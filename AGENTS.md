@@ -29,6 +29,20 @@ uv run pytest                  # tests
 
 All four must pass. `mypy` runs in strict mode; keep the code fully typed.
 
+## CI & releases
+
+- `.github/workflows/ci.yml` runs the quality gates above (via `uv`) plus a
+  no-push Docker build on every push and PR.
+- `.github/workflows/release.yml` is a manual `workflow_dispatch` that takes a
+  semver `version`, bumps it in **both** `pyproject.toml` and
+  `src/supernote_task_service/__init__.py` (keep these two in sync — the value
+  feeds the FastAPI app `version`), runs tests, publishes the image to GHCR
+  (`:<version>` and `:latest`), commits the bump, tags `v<version>`, and creates
+  a GitHub release.
+- Workflows pin the latest major action versions (checkout v7, setup-uv v8,
+  docker/* login v4 / metadata v6 / setup-buildx v4 / build-push v7). Bump to
+  the newest majors when updating to avoid deprecated-runtime warnings.
+
 ## Project layout
 
 ```

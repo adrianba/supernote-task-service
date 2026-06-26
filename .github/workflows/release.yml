@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, semver without a leading v (e.g. 1.2.3)"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Validate version input
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?$'; then
+            echo "::error::'$VERSION' is not a valid semver version (e.g. 1.2.3)"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          version: "0.9.22"
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Bump version in pyproject.toml and __init__.py
+        run: |
+          sed -i -E "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i -E "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" \
+            src/supernote_task_service/__init__.py
+          grep -qx "version = \"$VERSION\"" pyproject.toml
+          grep -qx "__version__ = \"$VERSION\"" src/supernote_task_service/__init__.py
+
+      - name: Verify build and tests
+        run: |
+          uv sync --locked
+          uv run pytest
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=raw,value=latest
+
+      # Build from the working tree (already bumped) and publish to GHCR before
+      # mutating the repository, so a build/push failure leaves no dangling tag.
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Commit version bump and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml src/supernote_task_service/__init__.py
+          git commit -m "Release v$VERSION"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes "Container image: \`${IMAGE}:${VERSION}\` (also tagged \`latest\`)."
