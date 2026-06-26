@@ -88,19 +88,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if int(content_length) > settings.max_request_body_bytes:
                     return JSONResponse(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        content={"detail": "Request body too large."},
+                        content={"detail": "Request body too large.", "code": "payload_too_large"},
                     )
             except ValueError:
                 return JSONResponse(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": "Invalid Content-Length header."},
+                    content={"detail": "Invalid Content-Length header.", "code": "bad_request"},
                 )
         elif has_body_method and request.headers.get("transfer-encoding"):
             # Require a declared length so the body-size limit cannot be bypassed
             # with a chunked/streaming request.
             return JSONResponse(
                 status_code=status.HTTP_411_LENGTH_REQUIRED,
-                content={"detail": "Content-Length is required."},
+                content={"detail": "Content-Length is required.", "code": "length_required"},
             )
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():

@@ -87,10 +87,28 @@ These come from https://github.com/adrianba/supernote-todo and are enforced in
 (inclusive lower bound so no same-millisecond change is ever missed) and return
 `cursor` for the next call. Results are capped by `limit` (default 500, max
 1000); a full page advances the cursor only to the last delivered row so callers
-can page through. Delta responses include completed and soft-deleted rows so
+can page through. Responses also carry `has_more` (true while the page was
+capped at the limit). Delta responses include completed and soft-deleted rows so
 clients can propagate deletions, and clients must treat sync as idempotent.
 Don't change these semantics without updating both `repository.py` and the
-README.
+README. Optional `CURSOR_MAX_AGE_MS` (default `0` = off) makes a too-old `since`
+return `410 Gone` (`code: "cursor_expired"`); keep it defaulted off.
+
+## API conventions
+
+- `POST /v1/tasks` and `POST /v1/lists` return the **full created resource**
+  (`201`); list creation is **idempotent by encoded title** (existing
+  non-deleted match returns `200`).
+- Mutating endpoints accept an optional `If-Unmodified-Since` header (the
+  client's last-known `last_modified` as **Unix ms**); a version mismatch is
+  `409 Conflict` while a missing row stays `404`. Absent header = unconditional
+  last-write-wins. Thread `expected_last_modified` through `repository.py`.
+- `importance` (task priority 1–5 / null) maps to the varchar
+  `t_schedule_task.importance` column (stored as a numeric string).
+- Error bodies are always `{"detail", "code"}`; raise `ApiError` for a specific
+  `code`, otherwise the status→code map in `errors.py` applies.
+- `due` accepts date-only `YYYY-MM-DD` (midnight UTC); naive datetimes are UTC.
+  There is **no task start-date column** in the schema — do not invent one.
 
 ## Security conventions
 

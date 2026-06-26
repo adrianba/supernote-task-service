@@ -7,6 +7,8 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, Request, Response, status
 
 from .config import Settings
+from .encoding import now_ms
+from .errors import ApiError
 from .ratelimit import RateLimiter
 from .repository import Repository
 from .security import require_api_key
@@ -18,6 +20,22 @@ def get_settings(request: Request) -> Settings:
 
 def get_repository(request: Request) -> Repository:
     return request.app.state.repository  # type: ignore[no-any-return]
+
+
+def ensure_cursor_fresh(since: int | None, settings: Settings) -> None:
+    """Reject a delta cursor older than the configured retention with 410.
+
+    Disabled by default (``cursor_max_age_ms == 0``) so behavior is unchanged;
+    when enabled, a too-old ``since`` signals the client to do a full resync.
+    """
+    if since is None or settings.cursor_max_age_ms <= 0:
+        return
+    if since < now_ms() - settings.cursor_max_age_ms:
+        raise ApiError(
+            status.HTTP_410_GONE,
+            "Cursor has expired; perform a full resync without 'since'.",
+            code="cursor_expired",
+        )
 
 
 def _client_ip(request: Request, trust_proxy: bool) -> str:
@@ -78,4 +96,5 @@ async def enforce_rate_limit(
 
 
 RepositoryDep = Annotated[Repository, Depends(get_repository)]
+SettingsDep = Annotated[Settings, Depends(get_settings)]
 CallerDep = Annotated[str, Depends(enforce_rate_limit)]
