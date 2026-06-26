@@ -19,8 +19,9 @@ def list_lists(
     repo: RepositoryDep,
     _caller: CallerDep,
     since: Annotated[int | None, Query(ge=0, description="Unix ms cursor for delta sync.")] = None,
+    limit: Annotated[int | None, Query(ge=1, le=1000, description="Max rows to return.")] = None,
 ) -> TaskListsPage:
-    lists, cursor = repo.list_lists(since=since)
+    lists, cursor = repo.list_lists(since=since, limit=limit)
     return TaskListsPage(lists=lists, cursor=cursor)
 
 

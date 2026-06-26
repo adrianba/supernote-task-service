@@ -42,6 +42,16 @@ _TASK_COLUMNS = """
     COALESCE(g.title, 'Inbox') AS category
 """
 
+# Safety bounds so a single request can never load an unbounded result set.
+DEFAULT_PAGE_LIMIT = 500
+MAX_PAGE_LIMIT = 1000
+
+
+def _clamp_limit(limit: int | None) -> int:
+    if limit is None:
+        return DEFAULT_PAGE_LIMIT
+    return max(1, min(limit, MAX_PAGE_LIMIT))
+
 
 class Repository:
     """Data-access object backed by a :class:`Database` connection pool."""
@@ -89,15 +99,19 @@ class Repository:
         list_id: str | None = None,
         include_completed: bool = True,
         inbox_only: bool = False,
+        limit: int | None = None,
     ) -> tuple[list[Task], int]:
         server_now = now_ms()
+        effective_limit = _clamp_limit(limit)
         clauses: list[str] = []
         params: list[Any] = []
 
         if since is not None:
             # Delta mode: include completed and soft-deleted rows so clients can
-            # propagate every change, including deletions.
-            clauses.append("t.last_modified > %s AND t.last_modified <= %s")
+            # propagate every change, including deletions. The lower bound is
+            # inclusive so a change written at exactly the previous cursor
+            # millisecond is never lost; clients must treat sync as idempotent.
+            clauses.append("t.last_modified >= %s AND t.last_modified <= %s")
             params.extend([since, server_now])
         else:
             clauses.append("t.is_deleted = 'N'")
@@ -111,17 +125,28 @@ class Repository:
             params.append(list_id)
 
         where = " AND ".join(clauses)
+        params.append(effective_limit)
         # Only the constant column list and pre-built clause strings (which use
         # %s placeholders) are interpolated; all values are parameterized.
         sql = (
             f"SELECT {_TASK_COLUMNS} FROM t_schedule_task t "  # noqa: S608
             "LEFT JOIN t_schedule_task_group g ON t.task_list_id = g.task_list_id "
-            f"WHERE {where} ORDER BY t.last_modified ASC"
+            f"WHERE {where} ORDER BY t.last_modified ASC, t.task_id ASC LIMIT %s"
         )
         with self._db.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-        return [self._row_to_task(r) for r in rows], server_now
+        tasks = [self._row_to_task(r) for r in rows]
+        cursor = self._page_cursor(tasks, effective_limit, server_now)
+        return tasks, cursor
+
+    @staticmethod
+    def _page_cursor(items: list[Any], effective_limit: int, server_now: int) -> int:
+        # If the page is full there may be more rows; advance the cursor only to
+        # the last delivered row's timestamp so the next call resumes there.
+        if len(items) == effective_limit and items:
+            return int(items[-1].last_modified)
+        return server_now
 
     def get_task(self, task_id: str) -> Task | None:
         # Only the constant column list is interpolated; task_id is bound.
@@ -250,23 +275,28 @@ class Repository:
 
     # ----- list reads -----------------------------------------------------
 
-    def list_lists(self, *, since: int | None = None) -> tuple[list[TaskList], int]:
+    def list_lists(
+        self, *, since: int | None = None, limit: int | None = None
+    ) -> tuple[list[TaskList], int]:
         server_now = now_ms()
+        effective_limit = _clamp_limit(limit)
         if since is not None:
+            # Inclusive lower bound (see list_tasks) for idempotent delta sync.
             sql = (
                 "SELECT task_list_id, title, last_modified, is_deleted "
                 "FROM t_schedule_task_group "
-                "WHERE last_modified > %s AND last_modified <= %s "
-                "ORDER BY last_modified ASC"
+                "WHERE last_modified >= %s AND last_modified <= %s "
+                "ORDER BY last_modified ASC, task_list_id ASC LIMIT %s"
             )
-            params: tuple[Any, ...] = (since, server_now)
+            params: tuple[Any, ...] = (since, server_now, effective_limit)
             include_inbox = False
         else:
             sql = (
                 "SELECT task_list_id, title, last_modified, is_deleted "
-                "FROM t_schedule_task_group WHERE is_deleted = 'N' ORDER BY title"
+                "FROM t_schedule_task_group WHERE is_deleted = 'N' "
+                "ORDER BY title LIMIT %s"
             )
-            params = ()
+            params = (effective_limit,)
             include_inbox = True
 
         with self._db.cursor() as cur:
@@ -274,9 +304,10 @@ class Repository:
             rows = cur.fetchall()
 
         lists = [self._row_to_list(r) for r in rows]
+        cursor = self._page_cursor(lists, effective_limit, server_now)
         if include_inbox:
             lists.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
-        return lists, server_now
+        return lists, cursor
 
     def list_exists(self, list_id: str) -> bool:
         with self._db.cursor() as cur:

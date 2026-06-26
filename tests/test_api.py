@@ -102,3 +102,14 @@ def test_rate_limit_returns_429(low_rate_client, auth) -> None:
     statuses = [low_rate_client.get("/v1/lists", headers=auth).status_code for _ in range(6)]
     assert statuses[-1] == 429
     assert 200 in statuses
+
+
+def test_unauthenticated_requests_are_rate_limited(low_rate_client) -> None:
+    # Pre-auth per-IP limiting (default 30/window) eventually throttles even
+    # invalid keys, so brute-forcing returns 429 rather than unlimited 401s.
+    statuses = [
+        low_rate_client.get("/v1/tasks", headers={"Authorization": "Bearer nope"}).status_code
+        for _ in range(40)
+    ]
+    assert 401 in statuses
+    assert 429 in statuses

@@ -36,13 +36,20 @@ class FakeRepository:
 
     # tasks
     def list_tasks(
-        self, *, since=None, list_id=None, include_completed=True, inbox_only=False
+        self,
+        *,
+        since=None,
+        list_id=None,
+        include_completed=True,
+        inbox_only=False,
+        limit=None,
     ) -> tuple[list[Task], int]:
         cursor = now_ms()
+        effective_limit = min(limit or 500, 1000)
         result = []
         for t in self._tasks.values():
             if since is not None:
-                if not (since < t["last_modified"] <= cursor):
+                if not (since <= t["last_modified"] <= cursor):
                     continue
             else:
                 if t["is_deleted"]:
@@ -54,7 +61,10 @@ class FakeRepository:
             if not inbox_only and list_id is not None and t["list_id"] != list_id:
                 continue
             result.append(self._to_task(t))
-        result.sort(key=lambda x: x.last_modified)
+        result.sort(key=lambda x: (x.last_modified, x.id))
+        result = result[:effective_limit]
+        if len(result) == effective_limit and result:
+            cursor = result[-1].last_modified
         return result, cursor
 
     def get_task(self, task_id: str) -> Task | None:
@@ -117,16 +127,21 @@ class FakeRepository:
         return True
 
     # lists
-    def list_lists(self, *, since=None) -> tuple[list[TaskList], int]:
+    def list_lists(self, *, since=None, limit=None) -> tuple[list[TaskList], int]:
         cursor = now_ms()
+        effective_limit = min(limit or 500, 1000)
         out = []
         for ls in self._lists.values():
             if since is not None:
-                if not (since < ls["last_modified"] <= cursor):
+                if not (since <= ls["last_modified"] <= cursor):
                     continue
             elif ls["is_deleted"]:
                 continue
             out.append(self._to_list(ls))
+        out.sort(key=lambda x: (x.last_modified, x.id or ""))
+        out = out[:effective_limit]
+        if len(out) == effective_limit and out:
+            cursor = out[-1].last_modified
         if since is None:
             out.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
         return out, cursor

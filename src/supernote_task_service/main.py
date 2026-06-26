@@ -44,6 +44,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         limit=settings.rate_limit_requests,
         window_seconds=settings.rate_limit_window_seconds,
     )
+    app.state.pre_auth_rate_limiter = RateLimiter(
+        limit=settings.unauth_rate_limit_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
     try:
         yield
     finally:
@@ -78,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         content_length = request.headers.get("content-length")
+        has_body_method = request.method in {"POST", "PUT", "PATCH"}
         if content_length is not None:
             try:
                 if int(content_length) > settings.max_request_body_bytes:
@@ -90,6 +95,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"detail": "Invalid Content-Length header."},
                 )
+        elif has_body_method and request.headers.get("transfer-encoding"):
+            # Require a declared length so the body-size limit cannot be bypassed
+            # with a chunked/streaming request.
+            return JSONResponse(
+                status_code=status.HTTP_411_LENGTH_REQUIRED,
+                content={"detail": "Content-Length is required."},
+            )
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers.setdefault(key, value)

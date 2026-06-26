@@ -60,6 +60,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `API_KEYS` | `""` | Comma-separated API keys. Hashed in memory; compared in constant time. |
 | `RATE_LIMIT_REQUESTS` | `120` | Allowed requests per window per key + IP. |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length (seconds). |
+| `UNAUTH_RATE_LIMIT_REQUESTS` | `30` | Pre-auth requests per window per IP (throttles key guessing). |
 | `LOG_LEVEL` | `INFO` | Logging level. |
 | `ENABLE_DOCS` | `false` | Expose Swagger UI at `/docs` and `/openapi.json`. |
 | `MAX_REQUEST_BODY_BYTES` | `65536` | Reject bodies larger than this. |
@@ -137,7 +138,7 @@ Health endpoints are unauthenticated: `GET /healthz` (liveness),
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/v1/tasks` | List/sync tasks. Filters: `since`, `list_id`, `inbox`, `include_completed`. |
+| `GET` | `/v1/tasks` | List/sync tasks. Filters: `since`, `list_id`, `inbox`, `include_completed`, `limit`. |
 | `POST` | `/v1/tasks` | Create a task. |
 | `GET` | `/v1/tasks/{id}` | Get a task. |
 | `PATCH` | `/v1/tasks/{id}` | Partial update (omitted fields unchanged). |
@@ -194,12 +195,16 @@ millisecond cursor). The response includes a `cursor` to pass on the next call:
 
 Semantics:
 
-- A call with `since` returns every row changed in the half-open window
-  `since < last_modified <= cursor`, **including completed and soft-deleted
+- A call with `since` returns every row changed in the closed window
+  `since <= last_modified <= cursor`, **including completed and soft-deleted
   rows** so clients can propagate deletions (`"is_deleted": true`).
-- The returned `cursor` should be sent as `since` on the next call. The
-  half-open window guarantees **no gaps and no duplicates** at timestamp
-  boundaries.
+- The lower bound is inclusive so a change written at exactly the previous
+  cursor millisecond is never missed; clients should therefore treat sync as
+  **idempotent** (a row may occasionally be re-delivered and re-applying it is a
+  no-op).
+- Results are capped (`limit`, default 500, max 1000). When a full page is
+  returned the `cursor` advances only to the last delivered row's timestamp, so
+  repeating the call with that `cursor` pages through the remaining changes.
 - Omitting `since` returns the current active set (non-deleted), and the
   `cursor` can be used to begin incremental syncing afterwards.
 

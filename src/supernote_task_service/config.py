@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # Rate limiting (fixed window per credential + client IP).
     rate_limit_requests: int = Field(default=120, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
+    # Pre-auth limit per client IP, applied before API-key validation to blunt
+    # online key-guessing and unauthenticated floods.
+    unauth_rate_limit_requests: int = Field(default=30, alias="UNAUTH_RATE_LIMIT_REQUESTS")
 
     # Operational.
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

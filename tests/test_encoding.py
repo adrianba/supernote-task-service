@@ -31,7 +31,18 @@ def test_decode_emoji_handles_plain_text() -> None:
 
 def test_encode_detail_truncates_after_encoding() -> None:
     detail = "\U0001f6d2" * 50  # each emoji encodes to 9 chars
-    assert len(encode_detail(detail)) == 255
+    encoded = encode_detail(detail)
+    assert len(encoded) <= 255
+    # Truncation must not leave a partial [U+XXXX] token.
+    assert encoded.count("[U+") == encoded.count("]")
+    assert "[U+1F6D2]" in encoded
+
+
+def test_decode_emoji_ignores_lone_surrogates() -> None:
+    # A surrogate-range token must be left literal so JSON encoding cannot break.
+    assert decode_emoji("x[U+D800]y") == "x[U+D800]y"
+    # Out-of-range code points are also left untouched.
+    assert decode_emoji("[U+110000]") == "[U+110000]"
 
 
 def test_timestamp_round_trip() -> None:

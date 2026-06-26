@@ -35,12 +35,14 @@ def list_tasks(
     list_id: ListIdQuery = None,
     inbox: Annotated[bool, Query(description="Only Inbox tasks (task_list_id IS NULL).")] = False,
     include_completed: bool = True,
+    limit: Annotated[int | None, Query(ge=1, le=1000, description="Max rows to return.")] = None,
 ) -> TaskListPage:
     tasks, cursor = repo.list_tasks(
         since=since,
         list_id=list_id,
         include_completed=include_completed,
         inbox_only=inbox,
+        limit=limit,
     )
     return TaskListPage(tasks=tasks, cursor=cursor)
 

@@ -30,6 +30,7 @@ class Database:
         self._settings = settings
         self._pool: queue.LifoQueue[Connection] = queue.LifoQueue(maxsize=settings.db_pool_size)
         self._lock = threading.Lock()
+        self._user_lock = threading.Lock()
         self._created = 0
         self._user_id: int | None = None
 
@@ -48,21 +49,44 @@ class Database:
             write_timeout=self._settings.db_connect_timeout,
         )
 
+    def _create_counted(self) -> Connection:
+        """Open a new connection, only reserving a pool slot if it succeeds."""
+        with self._lock:
+            self._created += 1
+        try:
+            return self._connect()
+        except Exception:
+            # Release the reserved slot so a transient failure can't permanently
+            # shrink the pool's capacity.
+            with self._lock:
+                self._created -= 1
+            raise
+
     def _acquire(self) -> Connection:
         try:
             conn = self._pool.get_nowait()
         except queue.Empty:
             with self._lock:
-                if self._created < self._settings.db_pool_size:
-                    self._created += 1
-                    return self._connect()
-            conn = self._pool.get()  # block until one is returned
+                can_create = self._created < self._settings.db_pool_size
+            if can_create:
+                return self._create_counted()
+            try:
+                # Bounded wait avoids deadlocking a worker forever if every
+                # connection is in use and none is returned.
+                conn = self._pool.get(timeout=self._settings.db_connect_timeout)
+            except queue.Empty as exc:
+                raise pymysql.OperationalError(
+                    2003, "No database connection available from the pool."
+                ) from exc
         try:
             conn.ping(reconnect=True)
         except pymysql.Error:
             with suppress(pymysql.Error):
                 conn.close()
-            conn = self._connect()
+            # This connection occupied a slot; replace it without leaking count.
+            with self._lock:
+                self._created -= 1
+            conn = self._create_counted()
         return conn
 
     def _release(self, conn: Connection) -> None:
@@ -91,7 +115,9 @@ class Database:
         """Return the single-user ``user_id``, auto-detected and cached."""
         if self._user_id is not None:
             return self._user_id
-        with self._lock:
+        # A dedicated lock (not the pool lock) so detection can acquire a pooled
+        # connection without risking a deadlock against ``_acquire``.
+        with self._user_lock:
             if self._user_id is not None:
                 return self._user_id
             self._user_id = self._detect_user_id()

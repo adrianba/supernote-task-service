@@ -68,10 +68,14 @@ These come from https://github.com/adrianba/supernote-todo and are enforced in
 
 ## Incremental sync
 
-`since`-based queries use a half-open window `since < last_modified <= cursor`
-and return `cursor` for the next call. Delta responses include completed and
-soft-deleted rows so clients can propagate deletions. Don't change these
-semantics without updating both `repository.py` and the README.
+`since`-based queries use a closed window `since <= last_modified <= cursor`
+(inclusive lower bound so no same-millisecond change is ever missed) and return
+`cursor` for the next call. Results are capped by `limit` (default 500, max
+1000); a full page advances the cursor only to the last delivered row so callers
+can page through. Delta responses include completed and soft-deleted rows so
+clients can propagate deletions, and clients must treat sync as idempotent.
+Don't change these semantics without updating both `repository.py` and the
+README.
 
 ## Security conventions
 

@@ -73,16 +73,35 @@ def decode_emoji(text: str | None) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         try:
-            return chr(int(match.group(1), 16))
-        except (ValueError, OverflowError):
+            code = int(match.group(1), 16)
+        except ValueError:
             return match.group(0)
+        # Leave lone surrogate-range tokens untouched: chr() would produce an
+        # unencodable surrogate that breaks JSON/UTF-8 serialization.
+        if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+            return match.group(0)
+        return chr(code)
 
     return _EMOJI_DECODE_RE.sub(_replace, text)
 
 
 def encode_detail(detail: str) -> str:
-    """Emoji-encode the detail field and truncate to the column limit."""
-    return encode_emoji(detail)[:DETAIL_MAX_LEN]
+    """Emoji-encode the detail field and truncate to the column limit.
+
+    Truncation happens on character boundaries so a multi-character ``[U+XXXX]``
+    token is never split in half.
+    """
+    if not detail:
+        return detail or ""
+    out: list[str] = []
+    length = 0
+    for ch in detail:
+        token = f"[U+{ord(ch):X}]" if ord(ch) > 0xFFFF else ch
+        if length + len(token) > DETAIL_MAX_LEN:
+            break
+        out.append(token)
+        length += len(token)
+    return "".join(out)
 
 
 def decode_document_link(links_value: str | None) -> dict[str, object] | None:
