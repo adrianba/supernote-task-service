@@ -274,4 +274,4 @@ docker pull ghcr.io/<owner>/supernote-task-service:<version>
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
