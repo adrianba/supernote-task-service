@@ -5,12 +5,19 @@ from __future__ import annotations
 import pymysql
 from fastapi import APIRouter, Request, Response, status
 
+from .. import __version__
+
 router = APIRouter(tags=["health"])
 
 
 @router.get("/healthz", summary="Liveness probe")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/v1/version", summary="Service version")
+async def version() -> dict[str, str]:
+    return {"version": __version__}
 
 
 @router.get("/readyz", summary="Readiness probe")

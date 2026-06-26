@@ -40,7 +40,7 @@ from .models import (
 )
 
 _TASK_COLUMNS = """
-    t.task_id, t.task_list_id, t.title, t.detail, t.status,
+    t.task_id, t.task_list_id, t.title, t.detail, t.status, t.importance,
     t.due_time, t.completed_time, t.last_modified, t.links, t.is_deleted,
     COALESCE(g.title, 'Inbox') AS category
 """
@@ -65,6 +65,19 @@ class Repository:
     # ----- mapping helpers ------------------------------------------------
 
     @staticmethod
+    def _parse_importance(value: Any) -> int | None:
+        """Coerce the varchar ``importance`` column to an int (None if empty)."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
+    @staticmethod
     def _row_to_task(row: dict[str, Any]) -> Task:
         link_data = decode_document_link(row.get("links"))
         document_link = DocumentLink.model_validate(link_data) if link_data else None
@@ -77,6 +90,7 @@ class Repository:
             title=decode_emoji(row["title"]),
             detail=decode_emoji(row["detail"] or ""),
             status=TaskStatus(row["status"]),
+            importance=Repository._parse_importance(row.get("importance")),
             due=_ms_to_dt(due),
             completed=_ms_to_dt(completed),
             last_modified=int(row["last_modified"] or 0),
@@ -103,7 +117,7 @@ class Repository:
         include_completed: bool = True,
         inbox_only: bool = False,
         limit: int | None = None,
-    ) -> tuple[list[Task], int]:
+    ) -> tuple[list[Task], int, bool]:
         server_now = now_ms()
         effective_limit = _clamp_limit(limit)
         clauses: list[str] = []
@@ -142,7 +156,8 @@ class Repository:
         tasks = [self._row_to_task(r) for r in rows]
         if since is not None and self._is_single_ms_full_page(tasks, effective_limit):
             # The whole page sits on one millisecond; more rows may share it.
-            # Drain them and advance past the millisecond so we can't loop.
+            # Drain them and advance past the millisecond so we can't loop. The
+            # boundary is fully drained, so there is definitively no more.
             boundary = tasks[-1].last_modified
             tasks.extend(
                 self._drain_tasks_at(
@@ -152,9 +167,10 @@ class Repository:
                     inbox_only=inbox_only,
                 )
             )
-            return tasks, boundary + 1
+            return tasks, boundary + 1, False
         cursor = self._page_cursor(tasks, effective_limit, server_now)
-        return tasks, cursor
+        has_more = self._is_full_page(tasks, effective_limit)
+        return tasks, cursor, has_more
 
     def _drain_tasks_at(
         self, *, boundary: int, after_id: str, list_id: str | None, inbox_only: bool
@@ -199,6 +215,12 @@ class Repository:
             return int(items[-1].last_modified)
         return server_now
 
+    @staticmethod
+    def _is_full_page(items: list[Any], effective_limit: int) -> bool:
+        # A page capped at the limit may have more rows behind it; the client
+        # should keep paging while this is true.
+        return len(items) == effective_limit and bool(items)
+
     def get_task(self, task_id: str) -> Task | None:
         # Only the constant column list is interpolated; task_id is bound.
         sql = (
@@ -219,6 +241,7 @@ class Repository:
         user_id = self._db.get_user_id()
         due_time = _dt_to_ms(data.due)
         completed_time = ts if data.status == TaskStatus.completed else 0
+        importance = str(data.importance) if data.importance is not None else None
         links = (
             encode_document_link(_link_payload(data.document_link)) if data.document_link else None
         )
@@ -231,7 +254,7 @@ class Repository:
             all_sort_completed, sort_time, planer_sort_time, all_sort_time
         ) VALUES (
             %s, %s, %s, %s, %s,
-            %s, 'N', %s, NULL,
+            %s, 'N', %s, %s,
             %s, %s, %s, 'N',
             NULL, NULL, NULL, NULL, NULL, %s, %s, %s
         )
@@ -247,6 +270,7 @@ class Repository:
                     encode_detail(data.detail),
                     ts,
                     data.status.value,
+                    importance,
                     due_time,
                     completed_time,
                     links,
@@ -257,7 +281,9 @@ class Repository:
             )
         return task_id
 
-    def update_task(self, task_id: str, data: TaskUpdate) -> bool:
+    def update_task(
+        self, task_id: str, data: TaskUpdate, *, expected_last_modified: int | None = None
+    ) -> bool:
         fields = data.model_fields_set
         sets: list[str] = []
         params: list[Any] = []
@@ -273,6 +299,9 @@ class Repository:
             params.append(data.status.value)
             sets.append("completed_time = %s")
             params.append(now_ms() if data.status == TaskStatus.completed else 0)
+        if "importance" in fields:
+            sets.append("importance = %s")
+            params.append(str(data.importance) if data.importance is not None else None)
         if "due" in fields:
             sets.append("due_time = %s")
             params.append(_dt_to_ms(data.due))
@@ -288,32 +317,50 @@ class Repository:
             )
 
         if not sets:
+            if expected_last_modified is not None:
+                return self._row_matches_version(task_id, expected_last_modified)
             return self.task_exists(task_id)
 
         sets.append("last_modified = %s")
         params.append(now_ms())
         params.append(task_id)
+        where = "task_id = %s AND is_deleted = 'N'"
+        if expected_last_modified is not None:
+            where += " AND last_modified = %s"
+            params.append(expected_last_modified)
 
         # ``sets`` contains only constant "column = %s" fragments; values are bound.
-        sql = (
-            "UPDATE t_schedule_task SET "  # noqa: S608
-            + ", ".join(sets)
-            + " WHERE task_id = %s AND is_deleted = 'N'"
-        )
+        sql = "UPDATE t_schedule_task SET " + ", ".join(sets) + " WHERE " + where  # noqa: S608
         with self._db.cursor() as cur:
             affected = int(cur.execute(sql, params))
         return affected > 0
 
-    def set_status(self, task_id: str, status: TaskStatus) -> bool:
-        return self.update_task(task_id, TaskUpdate(status=status))
-
-    def delete_task(self, task_id: str) -> bool:
-        sql = (
-            "UPDATE t_schedule_task SET is_deleted = 'Y', last_modified = %s "
-            "WHERE task_id = %s AND is_deleted = 'N'"
-        )
+    def _row_matches_version(self, task_id: str, expected_last_modified: int) -> bool:
+        """Return True if the (active) task exists at the expected version."""
         with self._db.cursor() as cur:
-            affected = int(cur.execute(sql, (now_ms(), task_id)))
+            cur.execute(
+                "SELECT 1 FROM t_schedule_task "
+                "WHERE task_id = %s AND is_deleted = 'N' AND last_modified = %s",
+                (task_id, expected_last_modified),
+            )
+            return cur.fetchone() is not None
+
+    def set_status(
+        self, task_id: str, status: TaskStatus, *, expected_last_modified: int | None = None
+    ) -> bool:
+        return self.update_task(
+            task_id, TaskUpdate(status=status), expected_last_modified=expected_last_modified
+        )
+
+    def delete_task(self, task_id: str, *, expected_last_modified: int | None = None) -> bool:
+        params: list[Any] = [now_ms(), task_id]
+        where = "task_id = %s AND is_deleted = 'N'"
+        if expected_last_modified is not None:
+            where += " AND last_modified = %s"
+            params.append(expected_last_modified)
+        sql = "UPDATE t_schedule_task SET is_deleted = 'Y', last_modified = %s WHERE " + where  # noqa: S608
+        with self._db.cursor() as cur:
+            affected = int(cur.execute(sql, params))
         return affected > 0
 
     def task_exists(self, task_id: str) -> bool:
@@ -328,7 +375,7 @@ class Repository:
 
     def list_lists(
         self, *, since: int | None = None, limit: int | None = None
-    ) -> tuple[list[TaskList], int]:
+    ) -> tuple[list[TaskList], int, bool]:
         server_now = now_ms()
         effective_limit = _clamp_limit(limit)
         if since is not None:
@@ -358,11 +405,12 @@ class Repository:
         if since is not None and self._is_single_ms_full_page(lists, effective_limit):
             boundary = lists[-1].last_modified
             lists.extend(self._drain_lists_at(boundary=boundary, after_id=lists[-1].id))
-            return lists, boundary + 1
+            return lists, boundary + 1, False
         cursor = self._page_cursor(lists, effective_limit, server_now)
+        has_more = self._is_full_page(lists, effective_limit)
         if include_inbox:
             lists.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
-        return lists, cursor
+        return lists, cursor, has_more
 
     def _drain_lists_at(self, *, boundary: int, after_id: str | None) -> list[TaskList]:
         """Return remaining lists sharing ``boundary`` ms with id > ``after_id``."""
@@ -395,6 +443,28 @@ class Repository:
             )
             return cur.fetchone() is not None
 
+    def get_list_by_title(self, title: str) -> TaskList | None:
+        """Return the non-deleted list whose stored (encoded) title matches."""
+        sql = (
+            "SELECT task_list_id, title, last_modified, is_deleted "
+            "FROM t_schedule_task_group "
+            "WHERE title = %s AND is_deleted = 'N' "
+            "ORDER BY last_modified ASC, task_list_id ASC LIMIT 1"
+        )
+        with self._db.cursor() as cur:
+            cur.execute(sql, (encode_emoji(title),))
+            row = cur.fetchone()
+        return self._row_to_list(row) if row else None
+
+    def _list_matches_version(self, list_id: str, expected_last_modified: int) -> bool:
+        with self._db.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM t_schedule_task_group "
+                "WHERE task_list_id = %s AND is_deleted = 'N' AND last_modified = %s",
+                (list_id, expected_last_modified),
+            )
+            return cur.fetchone() is not None
+
     # ----- list writes ----------------------------------------------------
 
     def create_list(self, title: str) -> str:
@@ -410,22 +480,28 @@ class Repository:
             cur.execute(sql, (list_id, user_id, encode_emoji(title), ts, ts))
         return list_id
 
-    def update_list(self, list_id: str, title: str) -> bool:
-        sql = (
-            "UPDATE t_schedule_task_group SET title = %s, last_modified = %s "
-            "WHERE task_list_id = %s AND is_deleted = 'N'"
-        )
+    def update_list(
+        self, list_id: str, title: str, *, expected_last_modified: int | None = None
+    ) -> bool:
+        params: list[Any] = [encode_emoji(title), now_ms(), list_id]
+        where = "task_list_id = %s AND is_deleted = 'N'"
+        if expected_last_modified is not None:
+            where += " AND last_modified = %s"
+            params.append(expected_last_modified)
+        sql = "UPDATE t_schedule_task_group SET title = %s, last_modified = %s WHERE " + where  # noqa: S608
         with self._db.cursor() as cur:
-            affected = int(cur.execute(sql, (encode_emoji(title), now_ms(), list_id)))
+            affected = int(cur.execute(sql, params))
         return affected > 0
 
-    def delete_list(self, list_id: str) -> bool:
-        sql = (
-            "UPDATE t_schedule_task_group SET is_deleted = 'Y', last_modified = %s "
-            "WHERE task_list_id = %s AND is_deleted = 'N'"
-        )
+    def delete_list(self, list_id: str, *, expected_last_modified: int | None = None) -> bool:
+        params: list[Any] = [now_ms(), list_id]
+        where = "task_list_id = %s AND is_deleted = 'N'"
+        if expected_last_modified is not None:
+            where += " AND last_modified = %s"
+            params.append(expected_last_modified)
+        sql = "UPDATE t_schedule_task_group SET is_deleted = 'Y', last_modified = %s WHERE " + where  # noqa: S608
         with self._db.cursor() as cur:
-            affected = int(cur.execute(sql, (now_ms(), list_id)))
+            affected = int(cur.execute(sql, params))
         return affected > 0
 
 

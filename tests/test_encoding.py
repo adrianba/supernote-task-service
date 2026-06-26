@@ -52,6 +52,12 @@ def test_timestamp_round_trip() -> None:
     assert ms_to_datetime(0) is None
 
 
+def test_naive_datetime_treated_as_utc() -> None:
+    naive = datetime(2026, 6, 25, 0, 0)  # no tzinfo
+    aware = datetime(2026, 6, 25, 0, 0, tzinfo=UTC)
+    assert datetime_to_ms(naive) == datetime_to_ms(aware)
+
+
 def test_document_link_round_trip() -> None:
     payload = {
         "appName": "note",

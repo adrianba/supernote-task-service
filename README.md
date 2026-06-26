@@ -64,6 +64,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `LOG_LEVEL`                    | `INFO`              | Logging level.                                                         |
 | `ENABLE_DOCS`                  | `false`             | Expose Swagger UI at `/docs` and `/openapi.json`.                      |
 | `MAX_REQUEST_BODY_BYTES`       | `65536`             | Reject bodies larger than this.                                        |
+| `CURSOR_MAX_AGE_MS`            | `0`                 | Max age (ms) of a delta `since` cursor before `410 Gone`; `0` = off.   |
 | `TRUST_PROXY_HEADERS`          | `true`              | Trust `X-Forwarded-*`. Enable only behind a trusted proxy.             |
 
 > **Generate an API key:** `python -c "import secrets; print(secrets.token_urlsafe(32))"`
@@ -122,31 +123,41 @@ Authorization: Bearer <API_KEY>
 X-API-Key: <API_KEY>
 ```
 
-Health endpoints are unauthenticated: `GET /healthz` (liveness),
-`GET /readyz` (checks DB connectivity).
+Health and version endpoints are unauthenticated: `GET /healthz` (liveness),
+`GET /readyz` (checks DB connectivity), and `GET /v1/version` (returns
+`{"version": "..."}`).
 
 ### Lists (categories)
 
-| Method   | Path             | Description                                                    |
-| -------- | ---------------- | -------------------------------------------------------------- |
-| `GET`    | `/v1/lists`      | List categories (plus the implicit Inbox). Supports `?since=`. |
-| `POST`   | `/v1/lists`      | Create a category. Body: `{"title": "Work"}`.                  |
-| `PATCH`  | `/v1/lists/{id}` | Rename a category.                                             |
-| `DELETE` | `/v1/lists/{id}` | Soft-delete a category.                                        |
+| Method   | Path             | Description                                                                    |
+| -------- | ---------------- | ------------------------------------------------------------------------------ |
+| `GET`    | `/v1/lists`      | List categories (plus the implicit Inbox). Supports `?since=`, `?title=`.      |
+| `POST`   | `/v1/lists`      | Create a category (**idempotent by title**). Body: `{"title": "Work"}`.        |
+| `PATCH`  | `/v1/lists/{id}` | Rename a category.                                                             |
+| `DELETE` | `/v1/lists/{id}` | Soft-delete a category.                                                        |
+
+`POST /v1/lists` is **idempotent by title**: if a non-deleted list with the same
+(emoji-encoded) title already exists it is returned with `200 OK` instead of
+creating a duplicate; a freshly created list returns `201 Created`. This removes
+the read-modify-write race in "ensure a list by name". Soft-deleted lists with
+the same title do **not** block creation. `GET /v1/lists?title=<exact>` returns a
+single-element page for an exact title match, or `404` if none exists.
 
 ### Tasks
 
 | Method   | Path                        | Description                                                                          |
 | -------- | --------------------------- | ------------------------------------------------------------------------------------ |
 | `GET`    | `/v1/tasks`                 | List/sync tasks. Filters: `since`, `list_id`, `inbox`, `include_completed`, `limit`. |
-| `POST`   | `/v1/tasks`                 | Create a task.                                                                       |
+| `POST`   | `/v1/tasks`                 | Create a task. Returns the full created task (`201`).                                |
 | `GET`    | `/v1/tasks/{id}`            | Get a task.                                                                          |
 | `PATCH`  | `/v1/tasks/{id}`            | Partial update (omitted fields unchanged).                                           |
 | `DELETE` | `/v1/tasks/{id}`            | Soft-delete a task.                                                                  |
 | `POST`   | `/v1/tasks/{id}/complete`   | Mark completed.                                                                      |
 | `POST`   | `/v1/tasks/{id}/uncomplete` | Mark active.                                                                         |
 
-Task and list IDs are 32-character lowercase hex strings.
+Task and list IDs are 32-character lowercase hex strings. `POST /v1/tasks` and
+`POST /v1/lists` return the full created resource (including `id` and
+`last_modified`), so a client need not issue a follow-up `GET`.
 
 #### Create a task
 
@@ -154,8 +165,15 @@ Task and list IDs are 32-character lowercase hex strings.
 curl -X POST https://tasks.example.com/v1/tasks \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"title": "Buy groceries 🛒", "detail": "milk, eggs", "due": "2026-05-01T09:00:00Z"}'
-# → {"id": "a1b2c3..."}
+  -d '{"title": "Buy groceries 🛒", "detail": "milk, eggs", "importance": 2, "due": "2026-05-01T09:00:00Z"}'
+# → 201 Created
+# {
+#   "id": "a1b2c3...", "list_id": null, "category": "Inbox",
+#   "title": "Buy groceries 🛒", "detail": "milk, eggs",
+#   "status": "needsAction", "importance": 2,
+#   "due": "2026-05-01T09:00:00Z", "completed": null,
+#   "last_modified": 1714560001234, "is_deleted": false
+# }
 ```
 
 A task body accepts:
@@ -166,7 +184,8 @@ A task body accepts:
   "detail": "string (<=255)",
   "list_id": "32-hex or null (null = Inbox)",
   "status": "needsAction | completed",
-  "due": "ISO 8601 datetime or null",
+  "importance": "integer 1 (highest)..5, or null for none",
+  "due": "RFC3339 datetime, a date-only YYYY-MM-DD, or null",
   "document_link": {
     "appName": "note",
     "fileId": "...",
@@ -177,10 +196,39 @@ A task body accepts:
 }
 ```
 
+#### Date / timezone semantics
+
+- `due` (and the read-only `completed`) are stored as Unix milliseconds.
+- A **date-only** string such as `"2026-06-25"` is interpreted as **midnight
+  UTC**, so a pure date round-trips without drifting a day.
+- A **naive** datetime (no offset) is interpreted as **UTC**. Prefer sending
+  RFC3339 with an explicit offset (e.g. `2026-05-01T09:00:00+02:00`) to avoid
+  ambiguity.
+
+#### Optimistic concurrency
+
+The mutating task and list endpoints (`PATCH`, `DELETE`,
+`POST .../complete`, `POST .../uncomplete`) accept an optional
+**`If-Unmodified-Since`** request header carrying the client's last-known
+`last_modified` as a **Unix millisecond integer** (not an HTTP-date):
+
+```
+If-Unmodified-Since: 1714560001234
+```
+
+- If the stored row still has that `last_modified`, the write proceeds.
+- If the row was modified since (e.g. a concurrent edit on the Supernote
+  device), the API returns **`409 Conflict`** (`code: "conflict"`) and does not
+  write. The client should re-read and retry.
+- If the row does not exist, the API returns `404` as usual.
+- When the header is **absent**, behavior is unchanged: an unconditional,
+  last-write-wins update.
+
 ### Incremental sync
 
 Both `GET /v1/tasks` and `GET /v1/lists` accept `?since=<ms>` (a Unix
-millisecond cursor). The response includes a `cursor` to pass on the next call:
+millisecond cursor). The response includes a `cursor` to pass on the next call
+and a `has_more` flag:
 
 ```jsonc
 // GET /v1/tasks?since=1714560000000
@@ -196,21 +244,27 @@ millisecond cursor). The response includes a `cursor` to pass on the next call:
     { "id": "…", "title": "…", "is_deleted": true, "last_modified": 1714560005000 },
   ],
   "cursor": 1714560006000,
+  "has_more": false,
 }
 ```
 
-Semantics:
+Contract a client can rely on:
 
 - A call with `since` returns every row changed in the closed window
   `since <= last_modified <= cursor`, **including completed and soft-deleted
   rows** so clients can propagate deletions (`"is_deleted": true`).
-- The lower bound is inclusive so a change written at exactly the previous
-  cursor millisecond is never missed; clients should therefore treat sync as
-  **idempotent** (a row may occasionally be re-delivered and re-applying it is a
-  no-op).
+- The lower bound is **inclusive**, so a change written at exactly the previous
+  cursor millisecond is never missed; clients must therefore treat sync as
+  **idempotent** — a boundary row may occasionally be re-delivered and
+  re-applying it is a no-op.
+- Rows are returned in a stable order: **`last_modified ASC, task_id ASC`**
+  (lists order by `last_modified ASC, task_list_id ASC`).
 - Results are capped (`limit`, default 500, max 1000). When a full page is
-  returned the `cursor` advances only to the last delivered row's timestamp, so
-  repeating the call with that `cursor` pages through the remaining changes.
+  returned the `cursor` advances only to the last delivered row's timestamp.
+- **`has_more`** is `true` exactly when the page was capped at the effective
+  limit and more rows may remain. **Keep calling while `has_more` is `true`**,
+  passing the returned `cursor` as the next `since`. It becomes `false` once the
+  tail is reached.
 - Omitting `since` returns the current active set (non-deleted), and the
   `cursor` can be used to begin incremental syncing afterwards.
 
@@ -218,21 +272,39 @@ Semantics:
 > last-write-wins relative to the Supernote device. All writes set
 > `last_modified` to the current time.
 
+#### Expired cursors (410)
+
+Cursor expiry is **disabled by default** (`CURSOR_MAX_AGE_MS=0`), so every old
+`since` value keeps working. If `CURSOR_MAX_AGE_MS` is set to a positive number
+of milliseconds and a request supplies a `since` older than that retention
+bound, the API returns **`410 Gone`** (`code: "cursor_expired"`) to signal the
+client to drop its cursor and perform a full resync (a request without `since`).
+
 ### Errors
 
-JSON error bodies are always `{"detail": "..."}`.
+JSON error bodies are always `{"detail": "...", "code": "..."}`. The `code` is a
+stable, machine-readable string; `detail` is human-readable prose.
 
-| Status | Meaning                                       |
-| ------ | --------------------------------------------- |
-| `401`  | Missing/invalid API key.                      |
-| `404`  | Task or list not found.                       |
-| `413`  | Request body too large.                       |
-| `422`  | Validation error (bad field or malformed ID). |
-| `429`  | Rate limit exceeded (includes `Retry-After`). |
-| `503`  | Database unavailable.                         |
+| Status | `code`             | Meaning                                       |
+| ------ | ------------------ | --------------------------------------------- |
+| `401`  | `unauthorized`     | Missing/invalid API key.                      |
+| `404`  | `not_found`        | Task or list not found.                       |
+| `409`  | `conflict`         | Stale `If-Unmodified-Since` precondition.     |
+| `410`  | `cursor_expired`   | `since` older than the retention bound.       |
+| `413`  | `payload_too_large`| Request body too large.                       |
+| `422`  | `validation_error` | Validation error (bad field or malformed ID). |
+| `429`  | `rate_limited`     | Rate limit exceeded (includes `Retry-After`). |
+| `503`  | `db_unavailable`   | Database unavailable.                         |
 
 Successful authenticated responses include `X-RateLimit-Limit`,
 `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers.
+
+### Limitations
+
+- **Task start date is not supported.** The Supernote `t_schedule_task` schema
+  has no start/begin column, so a task start date cannot be stored and does not
+  round-trip. Only `due` (and the read-only `completed`) timestamps are
+  available.
 
 ---
 

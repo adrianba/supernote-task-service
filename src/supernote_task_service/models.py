@@ -60,15 +60,23 @@ class TaskCreate(BaseModel):
     detail: str = Field(default="", max_length=DETAIL_MAX)
     list_id: IdStr | None = Field(default=None, description="Null for the Inbox.")
     status: TaskStatus = TaskStatus.needs_action
-    due: datetime | None = None
+    importance: int | None = Field(
+        default=None, ge=1, le=5, description="Priority 1 (highest) to 5; null for none."
+    )
+    due: datetime | None = Field(
+        default=None,
+        description="Due date/time. Accepts RFC3339 or a date-only YYYY-MM-DD "
+        "(interpreted as midnight UTC). Naive datetimes are treated as UTC.",
+    )
     document_link: DocumentLink | None = None
 
 
 class TaskUpdate(BaseModel):
     """Partial update. Omitted fields are left unchanged.
 
-    ``due`` and ``document_link`` accept null to *clear* the value, so the
-    presence of each field is tracked explicitly via ``model_fields_set``.
+    ``due``, ``importance`` and ``document_link`` accept null to *clear* the
+    value, so the presence of each field is tracked explicitly via
+    ``model_fields_set``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -77,6 +85,7 @@ class TaskUpdate(BaseModel):
     detail: str | None = Field(default=None, max_length=DETAIL_MAX)
     list_id: IdStr | None = None
     status: TaskStatus | None = None
+    importance: int | None = Field(default=None, ge=1, le=5)
     due: datetime | None = None
     document_link: DocumentLink | None = None
 
@@ -94,6 +103,7 @@ class Task(BaseModel):
     title: str
     detail: str
     status: TaskStatus
+    importance: int | None = None
     due: datetime | None
     completed: datetime | None
     last_modified: int = Field(description="Unix epoch milliseconds.")
@@ -106,16 +116,19 @@ class TaskListPage(BaseModel):
 
     tasks: list[Task]
     cursor: int = Field(description="Pass as ?since= on the next call (Unix ms).")
+    has_more: bool = Field(
+        default=False, description="True if the page was capped; keep paging while true."
+    )
 
 
 class TaskListsPage(BaseModel):
     lists: list[TaskList]
     cursor: int = Field(description="Pass as ?since= on the next call (Unix ms).")
-
-
-class CreatedId(BaseModel):
-    id: str
+    has_more: bool = Field(
+        default=False, description="True if the page was capped; keep paging while true."
+    )
 
 
 class ErrorResponse(BaseModel):
     detail: str
+    code: str

@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     enable_docs: bool = Field(default=False, alias="ENABLE_DOCS")
     max_request_body_bytes: int = Field(default=65536, alias="MAX_REQUEST_BODY_BYTES")
+    # Reject delta cursors older than this many ms with 410 (0 = never expire).
+    cursor_max_age_ms: int = Field(default=0, alias="CURSOR_MAX_AGE_MS")
     # Trust the proxy-supplied client IP header (set only behind a trusted proxy).
     trust_proxy_headers: bool = Field(default=True, alias="TRUST_PROXY_HEADERS")
 

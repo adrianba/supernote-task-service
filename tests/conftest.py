@@ -43,7 +43,7 @@ class FakeRepository:
         include_completed=True,
         inbox_only=False,
         limit=None,
-    ) -> tuple[list[Task], int]:
+    ) -> tuple[list[Task], int, bool]:
         cursor = now_ms()
         effective_limit = min(limit or 500, 1000)
         result = []
@@ -71,10 +71,11 @@ class FakeRepository:
         ):
             boundary = page[-1].last_modified
             page = page + [t for t in result[effective_limit:] if t.last_modified == boundary]
-            return page, boundary + 1
-        if len(page) == effective_limit and page:
+            return page, boundary + 1, False
+        has_more = len(page) == effective_limit and bool(page)
+        if has_more:
             cursor = page[-1].last_modified
-        return page, cursor
+        return page, cursor, has_more
 
     def get_task(self, task_id: str) -> Task | None:
         t = self._tasks.get(task_id)
@@ -95,6 +96,7 @@ class FakeRepository:
             "title": encode_emoji(data.title),
             "detail": data.detail,
             "status": data.status,
+            "importance": data.importance,
             "due": datetime_to_ms(data.due) if data.due else 0,
             "completed": ts if data.status == TaskStatus.completed else 0,
             "last_modified": ts,
@@ -103,9 +105,11 @@ class FakeRepository:
         }
         return tid
 
-    def update_task(self, task_id: str, data: TaskUpdate) -> bool:
+    def update_task(self, task_id: str, data: TaskUpdate, *, expected_last_modified=None) -> bool:
         t = self._tasks.get(task_id)
         if t is None or t["is_deleted"]:
+            return False
+        if expected_last_modified is not None and t["last_modified"] != expected_last_modified:
             return False
         fields = data.model_fields_set
         if "title" in fields and data.title is not None:
@@ -115,6 +119,8 @@ class FakeRepository:
         if "status" in fields and data.status is not None:
             t["status"] = data.status
             t["completed"] = now_ms() if data.status == TaskStatus.completed else 0
+        if "importance" in fields:
+            t["importance"] = data.importance
         if "due" in fields:
             t["due"] = datetime_to_ms(data.due) if data.due else 0
         if "list_id" in fields:
@@ -124,19 +130,23 @@ class FakeRepository:
         t["last_modified"] = now_ms()
         return True
 
-    def set_status(self, task_id: str, status: TaskStatus) -> bool:
-        return self.update_task(task_id, TaskUpdate(status=status))
+    def set_status(self, task_id: str, status: TaskStatus, *, expected_last_modified=None) -> bool:
+        return self.update_task(
+            task_id, TaskUpdate(status=status), expected_last_modified=expected_last_modified
+        )
 
-    def delete_task(self, task_id: str) -> bool:
+    def delete_task(self, task_id: str, *, expected_last_modified=None) -> bool:
         t = self._tasks.get(task_id)
         if t is None or t["is_deleted"]:
+            return False
+        if expected_last_modified is not None and t["last_modified"] != expected_last_modified:
             return False
         t["is_deleted"] = True
         t["last_modified"] = now_ms()
         return True
 
     # lists
-    def list_lists(self, *, since=None, limit=None) -> tuple[list[TaskList], int]:
+    def list_lists(self, *, since=None, limit=None) -> tuple[list[TaskList], int, bool]:
         cursor = now_ms()
         effective_limit = min(limit or 500, 1000)
         out = []
@@ -157,12 +167,13 @@ class FakeRepository:
         ):
             boundary = page[-1].last_modified
             page = page + [ls for ls in out[effective_limit:] if ls.last_modified == boundary]
-            return page, boundary + 1
-        if len(page) == effective_limit and page:
+            return page, boundary + 1, False
+        has_more = len(page) == effective_limit and bool(page)
+        if has_more:
             cursor = page[-1].last_modified
         if since is None:
             page.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
-        return page, cursor
+        return page, cursor, has_more
 
     def list_exists(self, list_id: str) -> bool:
         ls = self._lists.get(list_id)
@@ -174,6 +185,16 @@ class FakeRepository:
             return None
         return self._to_list(ls)
 
+    def get_list_by_title(self, title: str) -> TaskList | None:
+        encoded = encode_emoji(title)
+        matches = [
+            self._to_list(ls)
+            for ls in self._lists.values()
+            if not ls["is_deleted"] and ls["title"] == encoded
+        ]
+        matches.sort(key=lambda x: (x.last_modified, x.id or ""))
+        return matches[0] if matches else None
+
     def create_list(self, title: str) -> str:
         lid = new_id()
         self._lists[lid] = {
@@ -184,17 +205,21 @@ class FakeRepository:
         }
         return lid
 
-    def update_list(self, list_id: str, title: str) -> bool:
+    def update_list(self, list_id: str, title: str, *, expected_last_modified=None) -> bool:
         ls = self._lists.get(list_id)
         if ls is None or ls["is_deleted"]:
+            return False
+        if expected_last_modified is not None and ls["last_modified"] != expected_last_modified:
             return False
         ls["title"] = encode_emoji(title)
         ls["last_modified"] = now_ms()
         return True
 
-    def delete_list(self, list_id: str) -> bool:
+    def delete_list(self, list_id: str, *, expected_last_modified=None) -> bool:
         ls = self._lists.get(list_id)
         if ls is None or ls["is_deleted"]:
+            return False
+        if expected_last_modified is not None and ls["last_modified"] != expected_last_modified:
             return False
         ls["is_deleted"] = True
         ls["last_modified"] = now_ms()
@@ -210,6 +235,7 @@ class FakeRepository:
             title=decode_emoji(t["title"]),
             detail=t["detail"],
             status=t["status"],
+            importance=t.get("importance"),
             due=ms_to_datetime(t["due"]),
             completed=ms_to_datetime(t["completed"]),
             last_modified=t["last_modified"],
