@@ -45,11 +45,10 @@ def update_list(
 ) -> TaskList:
     if not repo.update_list(list_id, body.title):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="List not found.")
-    lists, _ = repo.list_lists()
-    for item in lists:
-        if item.id == list_id:
-            return item
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="List not found.")
+    updated = repo.get_list(list_id)
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="List not found.")
+    return updated
 
 
 @router.delete(

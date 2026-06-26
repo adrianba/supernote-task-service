@@ -4,10 +4,13 @@ All queries are parameterized. Writes always set ``last_modified`` to the
 current time so the Supernote device treats them as the latest version, and
 deletes are soft (``is_deleted='Y'``) to stay compatible with device sync.
 
-Incremental sync uses a half-open millisecond window: a call with ``since``
-returns rows where ``since < last_modified <= server_now`` and returns
-``server_now`` as the next cursor. This avoids both gaps and duplicates at
-timestamp boundaries.
+Incremental sync uses an inclusive millisecond lower bound: a call with
+``since`` returns rows where ``since <= last_modified <= server_now`` and
+returns the next cursor. The inclusive bound means a change written at exactly
+the previous cursor millisecond is never lost, at the cost of re-delivering the
+boundary row, so clients must treat sync as idempotent. When a full page is
+entirely a single millisecond the remaining rows at that millisecond are
+drained and the cursor advances past it, so pagination can never stall.
 """
 
 from __future__ import annotations
@@ -137,8 +140,56 @@ class Repository:
             cur.execute(sql, params)
             rows = cur.fetchall()
         tasks = [self._row_to_task(r) for r in rows]
+        if since is not None and self._is_single_ms_full_page(tasks, effective_limit):
+            # The whole page sits on one millisecond; more rows may share it.
+            # Drain them and advance past the millisecond so we can't loop.
+            boundary = tasks[-1].last_modified
+            tasks.extend(
+                self._drain_tasks_at(
+                    boundary=boundary,
+                    after_id=tasks[-1].id,
+                    list_id=list_id,
+                    inbox_only=inbox_only,
+                )
+            )
+            return tasks, boundary + 1
         cursor = self._page_cursor(tasks, effective_limit, server_now)
         return tasks, cursor
+
+    def _drain_tasks_at(
+        self, *, boundary: int, after_id: str, list_id: str | None, inbox_only: bool
+    ) -> list[Task]:
+        """Return remaining tasks sharing ``boundary`` ms with id > ``after_id``."""
+        clauses = ["t.last_modified = %s", "t.task_id > %s"]
+        params: list[Any] = [boundary, after_id]
+        if inbox_only:
+            clauses.append("t.task_list_id IS NULL")
+        elif list_id is not None:
+            clauses.append("t.task_list_id = %s")
+            params.append(list_id)
+        where = " AND ".join(clauses)
+        # Only the constant column list and constant clause fragments are
+        # interpolated; all values are parameterized.
+        sql = (
+            f"SELECT {_TASK_COLUMNS} FROM t_schedule_task t "  # noqa: S608
+            "LEFT JOIN t_schedule_task_group g ON t.task_list_id = g.task_list_id "
+            f"WHERE {where} ORDER BY t.task_id ASC"
+        )
+        with self._db.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [self._row_to_task(r) for r in rows]
+
+    @staticmethod
+    def _is_single_ms_full_page(items: list[Any], effective_limit: int) -> bool:
+        # A full page whose first and last rows share a millisecond may hide
+        # further rows at that timestamp; advancing the cursor by milliseconds
+        # alone would then stall, so callers must drain the remaining rows.
+        return (
+            len(items) == effective_limit
+            and bool(items)
+            and items[0].last_modified == items[-1].last_modified
+        )
 
     @staticmethod
     def _page_cursor(items: list[Any], effective_limit: int, server_now: int) -> int:
@@ -304,10 +355,37 @@ class Repository:
             rows = cur.fetchall()
 
         lists = [self._row_to_list(r) for r in rows]
+        if since is not None and self._is_single_ms_full_page(lists, effective_limit):
+            boundary = lists[-1].last_modified
+            lists.extend(self._drain_lists_at(boundary=boundary, after_id=lists[-1].id))
+            return lists, boundary + 1
         cursor = self._page_cursor(lists, effective_limit, server_now)
         if include_inbox:
             lists.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
         return lists, cursor
+
+    def _drain_lists_at(self, *, boundary: int, after_id: str | None) -> list[TaskList]:
+        """Return remaining lists sharing ``boundary`` ms with id > ``after_id``."""
+        sql = (
+            "SELECT task_list_id, title, last_modified, is_deleted "
+            "FROM t_schedule_task_group "
+            "WHERE last_modified = %s AND task_list_id > %s "
+            "ORDER BY task_list_id ASC"
+        )
+        with self._db.cursor() as cur:
+            cur.execute(sql, (boundary, after_id))
+            rows = cur.fetchall()
+        return [self._row_to_list(r) for r in rows]
+
+    def get_list(self, list_id: str) -> TaskList | None:
+        sql = (
+            "SELECT task_list_id, title, last_modified, is_deleted "
+            "FROM t_schedule_task_group WHERE task_list_id = %s AND is_deleted = 'N'"
+        )
+        with self._db.cursor() as cur:
+            cur.execute(sql, (list_id,))
+            row = cur.fetchone()
+        return self._row_to_list(row) if row else None
 
     def list_exists(self, list_id: str) -> bool:
         with self._db.cursor() as cur:

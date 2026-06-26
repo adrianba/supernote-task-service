@@ -62,10 +62,19 @@ class FakeRepository:
                 continue
             result.append(self._to_task(t))
         result.sort(key=lambda x: (x.last_modified, x.id))
-        result = result[:effective_limit]
-        if len(result) == effective_limit and result:
-            cursor = result[-1].last_modified
-        return result, cursor
+        page = result[:effective_limit]
+        if (
+            since is not None
+            and len(page) == effective_limit
+            and page
+            and page[0].last_modified == page[-1].last_modified
+        ):
+            boundary = page[-1].last_modified
+            page = page + [t for t in result[effective_limit:] if t.last_modified == boundary]
+            return page, boundary + 1
+        if len(page) == effective_limit and page:
+            cursor = page[-1].last_modified
+        return page, cursor
 
     def get_task(self, task_id: str) -> Task | None:
         t = self._tasks.get(task_id)
@@ -139,16 +148,31 @@ class FakeRepository:
                 continue
             out.append(self._to_list(ls))
         out.sort(key=lambda x: (x.last_modified, x.id or ""))
-        out = out[:effective_limit]
-        if len(out) == effective_limit and out:
-            cursor = out[-1].last_modified
+        page = out[:effective_limit]
+        if (
+            since is not None
+            and len(page) == effective_limit
+            and page
+            and page[0].last_modified == page[-1].last_modified
+        ):
+            boundary = page[-1].last_modified
+            page = page + [ls for ls in out[effective_limit:] if ls.last_modified == boundary]
+            return page, boundary + 1
+        if len(page) == effective_limit and page:
+            cursor = page[-1].last_modified
         if since is None:
-            out.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
-        return out, cursor
+            page.insert(0, TaskList(id=None, title="Inbox", last_modified=0, is_deleted=False))
+        return page, cursor
 
     def list_exists(self, list_id: str) -> bool:
         ls = self._lists.get(list_id)
         return ls is not None and not ls["is_deleted"]
+
+    def get_list(self, list_id: str) -> TaskList | None:
+        ls = self._lists.get(list_id)
+        if ls is None or ls["is_deleted"]:
+            return None
+        return self._to_list(ls)
 
     def create_list(self, title: str) -> str:
         lid = new_id()

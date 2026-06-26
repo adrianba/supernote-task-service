@@ -14,7 +14,9 @@ async def healthz() -> dict[str, str]:
 
 
 @router.get("/readyz", summary="Readiness probe")
-async def readyz(request: Request, response: Response) -> dict[str, str]:
+def readyz(request: Request, response: Response) -> dict[str, str]:
+    # Sync handler so FastAPI runs the blocking DB ping in its threadpool and a
+    # slow/unreachable database can't stall the event loop for other requests.
     db = request.app.state.database
     try:
         db.ping()

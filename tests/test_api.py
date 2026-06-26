@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from supernote_task_service.models import TaskCreate
+from tests.conftest import FakeRepository
+
 
 def test_healthz_is_public(client) -> None:
     resp = client.get("/healthz")
@@ -113,3 +116,20 @@ def test_unauthenticated_requests_are_rate_limited(low_rate_client) -> None:
     ]
     assert 401 in statuses
     assert 429 in statuses
+
+
+def test_delta_pagination_drains_same_millisecond_group() -> None:
+    # More rows than the page limit share one last_modified millisecond. The
+    # page-cursor must drain the whole group and advance past it so a syncing
+    # client makes progress instead of looping on the same timestamp forever.
+    repo = FakeRepository()
+    ids = [repo.create_task(TaskCreate(title=f"t{i}", list_id=None)) for i in range(3)]
+    for tid in ids:
+        repo._tasks[tid]["last_modified"] = 1000
+
+    page, cursor = repo.list_tasks(since=500, limit=2)
+    assert {t.id for t in page} == set(ids)
+    assert cursor == 1001
+
+    nxt, _ = repo.list_tasks(since=cursor, limit=2)
+    assert nxt == []

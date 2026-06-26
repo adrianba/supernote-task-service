@@ -49,27 +49,38 @@ class Database:
             write_timeout=self._settings.db_connect_timeout,
         )
 
-    def _create_counted(self) -> Connection:
-        """Open a new connection, only reserving a pool slot if it succeeds."""
+    def _try_reserve_slot(self) -> bool:
+        """Atomically reserve a pool slot if capacity remains.
+
+        The check and the increment happen under the same lock so two threads
+        can never both observe spare capacity and overshoot ``db_pool_size``.
+        """
         with self._lock:
-            self._created += 1
+            if self._created < self._settings.db_pool_size:
+                self._created += 1
+                return True
+            return False
+
+    def _unreserve_slot(self) -> None:
+        with self._lock:
+            self._created -= 1
+
+    def _create_reserved(self) -> Connection:
+        """Open a connection for an already-reserved slot, freeing it on failure."""
         try:
             return self._connect()
         except Exception:
             # Release the reserved slot so a transient failure can't permanently
             # shrink the pool's capacity.
-            with self._lock:
-                self._created -= 1
+            self._unreserve_slot()
             raise
 
     def _acquire(self) -> Connection:
         try:
             conn = self._pool.get_nowait()
         except queue.Empty:
-            with self._lock:
-                can_create = self._created < self._settings.db_pool_size
-            if can_create:
-                return self._create_counted()
+            if self._try_reserve_slot():
+                return self._create_reserved()
             try:
                 # Bounded wait avoids deadlocking a worker forever if every
                 # connection is in use and none is returned.
@@ -83,17 +94,23 @@ class Database:
         except pymysql.Error:
             with suppress(pymysql.Error):
                 conn.close()
-            # This connection occupied a slot; replace it without leaking count.
-            with self._lock:
-                self._created -= 1
-            conn = self._create_counted()
+            # The dead connection still owns its reserved slot; reconnect under
+            # the same reservation instead of releasing and re-reserving it.
+            try:
+                conn = self._connect()
+            except Exception:
+                self._unreserve_slot()
+                raise
         return conn
 
     def _release(self, conn: Connection) -> None:
         try:
             self._pool.put_nowait(conn)
         except queue.Full:
+            # Sound accounting keeps the queue from ever filling, but free the
+            # slot defensively if it somehow does so the count can't inflate.
             conn.close()
+            self._unreserve_slot()
 
     @contextmanager
     def cursor(self) -> Iterator[DictCursor]:
