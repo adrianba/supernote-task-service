@@ -39,9 +39,10 @@ All four must pass. `mypy` runs in strict mode; keep the code fully typed.
   feeds the FastAPI app `version`), runs tests, publishes the image to GHCR
   (`:<version>` and `:latest`), commits the bump, tags `v<version>`, and creates
   a GitHub release.
-- Workflows pin the latest major action versions (checkout v7, setup-uv v8,
-  docker/* login v4 / metadata v6 / setup-buildx v4 / build-push v7). Bump to
-  the newest majors when updating to avoid deprecated-runtime warnings.
+- Workflows pin the latest major action versions (checkout v7, setup-uv
+  v8.2.0 — that action publishes no moving major tag, so pin the full
+  version; docker/* login v4 / metadata v6 / setup-buildx v4 / build-push v7).
+  Bump to the newest majors when updating to avoid deprecated-runtime warnings.
 
 ## Project layout
 
