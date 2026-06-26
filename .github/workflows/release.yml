@@ -52,6 +52,9 @@ jobs:
             src/supernote_task_service/__init__.py
           grep -qx "version = \"$VERSION\"" pyproject.toml
           grep -qx "__version__ = \"$VERSION\"" src/supernote_task_service/__init__.py
+          # Refresh the lockfile's own project version so `uv sync --locked` and
+          # the Docker build (which also syncs locked) stay consistent.
+          uv lock
 
       - name: Verify build and tests
         run: |
@@ -93,7 +96,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml src/supernote_task_service/__init__.py
+          git add pyproject.toml uv.lock src/supernote_task_service/__init__.py
           if git diff --cached --quiet; then
             echo "Version already $VERSION; no bump commit needed."
           else
