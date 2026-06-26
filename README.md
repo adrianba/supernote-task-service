@@ -1,0 +1,243 @@
+# Supernote Task Service
+
+An authenticated HTTP API for synchronizing **Supernote to-do tasks** with the
+Supernote Private Cloud's MariaDB database. It exposes a clean REST interface to
+add, update, complete, and remove tasks across lists/categories, and supports
+**incremental sync** so a client can fetch only what changed since its last call.
+
+The service is designed to run in a Docker container on the **same Docker
+network** as the Supernote MariaDB container, behind a TLS-terminating reverse
+proxy (Traefik).
+
+> The underlying database schema and access patterns are documented in
+> [adrianba/supernote-todo](https://github.com/adrianba/supernote-todo). All
+> writes follow that guide's safety rules (soft deletes, millisecond timestamps,
+> emoji encoding, document-link preservation).
+
+---
+
+## Architecture
+
+```
+        HTTPS                       Docker network: proxy
+client ───────► Traefik (TLS) ──────────────────────────┐
+                                                         ▼
+                                          supernote-task-service (FastAPI)
+                                                         │  Docker network: supernote
+                                                         ▼
+                                                 supernote-mariadb
+                                                   (supernotedb)
+```
+
+- **Auth:** every `/v1/*` request requires a valid API key.
+- **Rate limiting:** in-memory fixed window per API key + client IP.
+- **No host ports:** Traefik reaches the app internally; the app reaches MariaDB
+  internally. Nothing is published directly to the host.
+
+---
+
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/) for local development.
+- Docker for container builds and deployment.
+- Network reachability to the Supernote MariaDB container.
+
+---
+
+## Configuration
+
+All configuration is via environment variables (see [`.env.example`](.env.example)).
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUPERNOTE_DB_PASSWORD` | **(required)** | MariaDB password for the `supernote` user. |
+| `SUPERNOTE_DB_HOST` | `supernote-mariadb` | MariaDB hostname (container name on the shared network). |
+| `SUPERNOTE_DB_PORT` | `3306` | MariaDB port. |
+| `SUPERNOTE_DB_USER` | `supernote` | MariaDB user. |
+| `SUPERNOTE_DB_NAME` | `supernotedb` | Database name. |
+| `SUPERNOTE_DB_CONNECT_TIMEOUT` | `10` | Connect/read/write timeout (seconds). |
+| `SUPERNOTE_DB_POOL_SIZE` | `5` | Max pooled connections. |
+| `API_KEYS` | `""` | Comma-separated API keys. Hashed in memory; compared in constant time. |
+| `RATE_LIMIT_REQUESTS` | `120` | Allowed requests per window per key + IP. |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window length (seconds). |
+| `LOG_LEVEL` | `INFO` | Logging level. |
+| `ENABLE_DOCS` | `false` | Expose Swagger UI at `/docs` and `/openapi.json`. |
+| `MAX_REQUEST_BODY_BYTES` | `65536` | Reject bodies larger than this. |
+| `TRUST_PROXY_HEADERS` | `true` | Trust `X-Forwarded-*`. Enable only behind a trusted proxy. |
+
+> **Generate an API key:** `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+>
+> If `API_KEYS` is empty the service **fails closed** and rejects all
+> authenticated requests.
+
+---
+
+## Running locally
+
+```bash
+uv sync
+export SUPERNOTE_DB_PASSWORD=...        # or use a .env file
+export API_KEYS=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+export ENABLE_DOCS=true                 # optional, for /docs
+uv run supernote-task-service
+```
+
+The service listens on `http://0.0.0.0:8000` (override with `HOST`/`PORT`).
+
+### Quality gates
+
+```bash
+uv run ruff check .          # lint
+uv run ruff format --check . # formatting
+uv run mypy src              # type checking
+uv run pytest                # tests
+```
+
+---
+
+## Docker & Traefik deployment
+
+Build and run via the provided [`docker-compose.yml`](docker-compose.yml), which
+assumes an existing Traefik instance on an external `proxy` network and the
+Supernote MariaDB on an external `supernote` network:
+
+```bash
+cp .env.example .env          # then edit secrets
+docker compose up -d --build
+```
+
+Adjust the `Host(...)` rule, the `certresolver`, and the network names to match
+your environment. The image is Alpine-based, runs as a non-root user, and ships
+with a container `HEALTHCHECK` hitting `/healthz`.
+
+---
+
+## API
+
+Base path: `/v1`. All endpoints require an API key via either header:
+
+```
+Authorization: Bearer <API_KEY>
+X-API-Key: <API_KEY>
+```
+
+Health endpoints are unauthenticated: `GET /healthz` (liveness),
+`GET /readyz` (checks DB connectivity).
+
+### Lists (categories)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/lists` | List categories (plus the implicit Inbox). Supports `?since=`. |
+| `POST` | `/v1/lists` | Create a category. Body: `{"title": "Work"}`. |
+| `PATCH` | `/v1/lists/{id}` | Rename a category. |
+| `DELETE` | `/v1/lists/{id}` | Soft-delete a category. |
+
+### Tasks
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/tasks` | List/sync tasks. Filters: `since`, `list_id`, `inbox`, `include_completed`. |
+| `POST` | `/v1/tasks` | Create a task. |
+| `GET` | `/v1/tasks/{id}` | Get a task. |
+| `PATCH` | `/v1/tasks/{id}` | Partial update (omitted fields unchanged). |
+| `DELETE` | `/v1/tasks/{id}` | Soft-delete a task. |
+| `POST` | `/v1/tasks/{id}/complete` | Mark completed. |
+| `POST` | `/v1/tasks/{id}/uncomplete` | Mark active. |
+
+Task and list IDs are 32-character lowercase hex strings.
+
+#### Create a task
+
+```bash
+curl -X POST https://tasks.example.com/v1/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Buy groceries 🛒", "detail": "milk, eggs", "due": "2026-05-01T09:00:00Z"}'
+# → {"id": "a1b2c3..."}
+```
+
+A task body accepts:
+
+```jsonc
+{
+  "title": "string (1..600)",
+  "detail": "string (<=255)",
+  "list_id": "32-hex or null (null = Inbox)",
+  "status": "needsAction | completed",
+  "due": "ISO 8601 datetime or null",
+  "document_link": {
+    "appName": "note",
+    "fileId": "...",
+    "filePath": "...",
+    "page": 3,
+    "pageId": "..."
+  }
+}
+```
+
+### Incremental sync
+
+Both `GET /v1/tasks` and `GET /v1/lists` accept `?since=<ms>` (a Unix
+millisecond cursor). The response includes a `cursor` to pass on the next call:
+
+```jsonc
+// GET /v1/tasks?since=1714560000000
+{
+  "tasks": [
+    { "id": "…", "title": "…", "status": "needsAction", "is_deleted": false, "last_modified": 1714560001234 },
+    { "id": "…", "title": "…", "is_deleted": true,  "last_modified": 1714560005000 }
+  ],
+  "cursor": 1714560006000
+}
+```
+
+Semantics:
+
+- A call with `since` returns every row changed in the half-open window
+  `since < last_modified <= cursor`, **including completed and soft-deleted
+  rows** so clients can propagate deletions (`"is_deleted": true`).
+- The returned `cursor` should be sent as `since` on the next call. The
+  half-open window guarantees **no gaps and no duplicates** at timestamp
+  boundaries.
+- Omitting `since` returns the current active set (non-deleted), and the
+  `cursor` can be used to begin incremental syncing afterwards.
+
+> Sync uses the device's own `last_modified` (Unix ms) column, so it is
+> last-write-wins relative to the Supernote device. All writes set
+> `last_modified` to the current time.
+
+### Errors
+
+JSON error bodies are always `{"detail": "..."}`.
+
+| Status | Meaning |
+|---|---|
+| `401` | Missing/invalid API key. |
+| `404` | Task or list not found. |
+| `413` | Request body too large. |
+| `422` | Validation error (bad field or malformed ID). |
+| `429` | Rate limit exceeded (includes `Retry-After`). |
+| `503` | Database unavailable. |
+
+Successful authenticated responses include `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers.
+
+---
+
+## Security notes
+
+- API keys are never logged and are stored only as SHA-256 hashes in memory;
+  comparison is constant time.
+- All SQL uses parameterized queries; path/query IDs are validated as 32-hex.
+- Soft deletes only — rows are marked `is_deleted='Y'`, never hard-deleted,
+  to stay compatible with Supernote device sync.
+- The container runs as a non-root user with `no-new-privileges`, a read-only
+  root filesystem, and all Linux capabilities dropped (see compose file).
+- Interactive docs are disabled by default (`ENABLE_DOCS=false`).
+
+---
+
+## License
+
+MIT.

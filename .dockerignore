@@ -1,0 +1,21 @@
+# Version control / tooling
+.git
+.gitignore
+.github
+
+# Python caches and virtual environments
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local environment / secrets
+.env
+*.env
+
+# Tests and docs not needed in the image
+tests
+AGENTS.md
+docker-compose.yml

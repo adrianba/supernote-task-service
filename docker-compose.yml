@@ -1,0 +1,54 @@
+# Example deployment with Traefik terminating TLS.
+#
+# Assumptions:
+#   * Traefik is already running and attached to an external Docker network
+#     (named `proxy` below) and has an ACME/Let's Encrypt resolver named
+#     `letsencrypt` configured.
+#   * The Supernote MariaDB container is reachable on the `supernote` network.
+#   * The API itself publishes NO host ports; Traefik reaches it over the
+#     internal Docker network and the app reaches MariaDB the same way.
+#
+# Copy `.env.example` to `.env` and fill in the secrets before running:
+#   docker compose up -d --build
+
+services:
+  supernote-task-service:
+    build: .
+    image: supernote-task-service:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SUPERNOTE_DB_HOST: supernote-mariadb
+      TRUST_PROXY_HEADERS: "true"
+    networks:
+      - proxy
+      - supernote
+    # No `ports:` — only Traefik talks to this service.
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    cap_drop:
+      - ALL
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      # Routing
+      traefik.http.routers.supernote-tasks.rule: "Host(`tasks.example.com`)"
+      traefik.http.routers.supernote-tasks.entrypoints: websecure
+      traefik.http.routers.supernote-tasks.tls: "true"
+      traefik.http.routers.supernote-tasks.tls.certresolver: letsencrypt
+      traefik.http.routers.supernote-tasks.service: supernote-tasks
+      traefik.http.services.supernote-tasks.loadbalancer.server.port: "8000"
+      # Apply security headers at the edge as well.
+      traefik.http.routers.supernote-tasks.middlewares: supernote-tasks-headers
+      traefik.http.middlewares.supernote-tasks-headers.headers.stsSeconds: "31536000"
+      traefik.http.middlewares.supernote-tasks-headers.headers.stsIncludeSubdomains: "true"
+      traefik.http.middlewares.supernote-tasks-headers.headers.contentTypeNosniff: "true"
+      traefik.http.middlewares.supernote-tasks-headers.headers.frameDeny: "true"
+
+networks:
+  # Both networks are created and managed outside this compose file.
+  proxy:
+    external: true
+  supernote:
+    external: true
