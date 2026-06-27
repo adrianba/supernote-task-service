@@ -120,8 +120,9 @@ class Repository:
     ) -> tuple[list[Task], int, bool]:
         server_now = now_ms()
         effective_limit = _clamp_limit(limit)
-        clauses: list[str] = []
-        params: list[Any] = []
+        uid = self._db.get_user_id()
+        clauses: list[str] = ["t.user_id = %s"]
+        params: list[Any] = [uid]
 
         if since is not None:
             # Delta mode: include completed and soft-deleted rows so clients can
@@ -176,8 +177,8 @@ class Repository:
         self, *, boundary: int, after_id: str, list_id: str | None, inbox_only: bool
     ) -> list[Task]:
         """Return remaining tasks sharing ``boundary`` ms with id > ``after_id``."""
-        clauses = ["t.last_modified = %s", "t.task_id > %s"]
-        params: list[Any] = [boundary, after_id]
+        clauses = ["t.user_id = %s", "t.last_modified = %s", "t.task_id > %s"]
+        params: list[Any] = [self._db.get_user_id(), boundary, after_id]
         if inbox_only:
             clauses.append("t.task_list_id IS NULL")
         elif list_id is not None:
@@ -226,10 +227,10 @@ class Repository:
         sql = (
             f"SELECT {_TASK_COLUMNS} FROM t_schedule_task t "  # noqa: S608
             "LEFT JOIN t_schedule_task_group g ON t.task_list_id = g.task_list_id "
-            "WHERE t.task_id = %s AND t.is_deleted = 'N'"
+            "WHERE t.task_id = %s AND t.user_id = %s AND t.is_deleted = 'N'"
         )
         with self._db.cursor() as cur:
-            cur.execute(sql, (task_id,))
+            cur.execute(sql, (task_id, self._db.get_user_id()))
             row = cur.fetchone()
         return self._row_to_task(row) if row else None
 
@@ -324,7 +325,8 @@ class Repository:
         sets.append("last_modified = %s")
         params.append(now_ms())
         params.append(task_id)
-        where = "task_id = %s AND is_deleted = 'N'"
+        params.append(self._db.get_user_id())
+        where = "task_id = %s AND user_id = %s AND is_deleted = 'N'"
         if expected_last_modified is not None:
             where += " AND last_modified = %s"
             params.append(expected_last_modified)
@@ -340,8 +342,9 @@ class Repository:
         with self._db.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM t_schedule_task "
-                "WHERE task_id = %s AND is_deleted = 'N' AND last_modified = %s",
-                (task_id, expected_last_modified),
+                "WHERE task_id = %s AND user_id = %s AND is_deleted = 'N' "
+                "AND last_modified = %s",
+                (task_id, self._db.get_user_id(), expected_last_modified),
             )
             return cur.fetchone() is not None
 
@@ -353,8 +356,8 @@ class Repository:
         )
 
     def delete_task(self, task_id: str, *, expected_last_modified: int | None = None) -> bool:
-        params: list[Any] = [now_ms(), task_id]
-        where = "task_id = %s AND is_deleted = 'N'"
+        params: list[Any] = [now_ms(), task_id, self._db.get_user_id()]
+        where = "task_id = %s AND user_id = %s AND is_deleted = 'N'"
         if expected_last_modified is not None:
             where += " AND last_modified = %s"
             params.append(expected_last_modified)
@@ -366,8 +369,9 @@ class Repository:
     def task_exists(self, task_id: str) -> bool:
         with self._db.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM t_schedule_task WHERE task_id = %s AND is_deleted = 'N'",
-                (task_id,),
+                "SELECT 1 FROM t_schedule_task "
+                "WHERE task_id = %s AND user_id = %s AND is_deleted = 'N'",
+                (task_id, self._db.get_user_id()),
             )
             return cur.fetchone() is not None
 
@@ -378,23 +382,24 @@ class Repository:
     ) -> tuple[list[TaskList], int, bool]:
         server_now = now_ms()
         effective_limit = _clamp_limit(limit)
+        uid = self._db.get_user_id()
         if since is not None:
             # Inclusive lower bound (see list_tasks) for idempotent delta sync.
             sql = (
                 "SELECT task_list_id, title, last_modified, is_deleted "
                 "FROM t_schedule_task_group "
-                "WHERE last_modified >= %s AND last_modified <= %s "
+                "WHERE user_id = %s AND last_modified >= %s AND last_modified <= %s "
                 "ORDER BY last_modified ASC, task_list_id ASC LIMIT %s"
             )
-            params: tuple[Any, ...] = (since, server_now, effective_limit)
+            params: tuple[Any, ...] = (uid, since, server_now, effective_limit)
             include_inbox = False
         else:
             sql = (
                 "SELECT task_list_id, title, last_modified, is_deleted "
-                "FROM t_schedule_task_group WHERE is_deleted = 'N' "
+                "FROM t_schedule_task_group WHERE user_id = %s AND is_deleted = 'N' "
                 "ORDER BY title LIMIT %s"
             )
-            params = (effective_limit,)
+            params = (uid, effective_limit)
             include_inbox = True
 
         with self._db.cursor() as cur:
@@ -417,29 +422,31 @@ class Repository:
         sql = (
             "SELECT task_list_id, title, last_modified, is_deleted "
             "FROM t_schedule_task_group "
-            "WHERE last_modified = %s AND task_list_id > %s "
+            "WHERE user_id = %s AND last_modified = %s AND task_list_id > %s "
             "ORDER BY task_list_id ASC"
         )
         with self._db.cursor() as cur:
-            cur.execute(sql, (boundary, after_id))
+            cur.execute(sql, (self._db.get_user_id(), boundary, after_id))
             rows = cur.fetchall()
         return [self._row_to_list(r) for r in rows]
 
     def get_list(self, list_id: str) -> TaskList | None:
         sql = (
             "SELECT task_list_id, title, last_modified, is_deleted "
-            "FROM t_schedule_task_group WHERE task_list_id = %s AND is_deleted = 'N'"
+            "FROM t_schedule_task_group "
+            "WHERE task_list_id = %s AND user_id = %s AND is_deleted = 'N'"
         )
         with self._db.cursor() as cur:
-            cur.execute(sql, (list_id,))
+            cur.execute(sql, (list_id, self._db.get_user_id()))
             row = cur.fetchone()
         return self._row_to_list(row) if row else None
 
     def list_exists(self, list_id: str) -> bool:
         with self._db.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM t_schedule_task_group WHERE task_list_id = %s AND is_deleted = 'N'",
-                (list_id,),
+                "SELECT 1 FROM t_schedule_task_group "
+                "WHERE task_list_id = %s AND user_id = %s AND is_deleted = 'N'",
+                (list_id, self._db.get_user_id()),
             )
             return cur.fetchone() is not None
 
@@ -448,11 +455,11 @@ class Repository:
         sql = (
             "SELECT task_list_id, title, last_modified, is_deleted "
             "FROM t_schedule_task_group "
-            "WHERE title = %s AND is_deleted = 'N' "
+            "WHERE title = %s AND user_id = %s AND is_deleted = 'N' "
             "ORDER BY last_modified ASC, task_list_id ASC LIMIT 1"
         )
         with self._db.cursor() as cur:
-            cur.execute(sql, (encode_emoji(title),))
+            cur.execute(sql, (encode_emoji(title), self._db.get_user_id()))
             row = cur.fetchone()
         return self._row_to_list(row) if row else None
 
@@ -460,8 +467,9 @@ class Repository:
         with self._db.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM t_schedule_task_group "
-                "WHERE task_list_id = %s AND is_deleted = 'N' AND last_modified = %s",
-                (list_id, expected_last_modified),
+                "WHERE task_list_id = %s AND user_id = %s AND is_deleted = 'N' "
+                "AND last_modified = %s",
+                (list_id, self._db.get_user_id(), expected_last_modified),
             )
             return cur.fetchone() is not None
 
@@ -483,8 +491,8 @@ class Repository:
     def update_list(
         self, list_id: str, title: str, *, expected_last_modified: int | None = None
     ) -> bool:
-        params: list[Any] = [encode_emoji(title), now_ms(), list_id]
-        where = "task_list_id = %s AND is_deleted = 'N'"
+        params: list[Any] = [encode_emoji(title), now_ms(), list_id, self._db.get_user_id()]
+        where = "task_list_id = %s AND user_id = %s AND is_deleted = 'N'"
         if expected_last_modified is not None:
             where += " AND last_modified = %s"
             params.append(expected_last_modified)
@@ -494,8 +502,8 @@ class Repository:
         return affected > 0
 
     def delete_list(self, list_id: str, *, expected_last_modified: int | None = None) -> bool:
-        params: list[Any] = [now_ms(), list_id]
-        where = "task_list_id = %s AND is_deleted = 'N'"
+        params: list[Any] = [now_ms(), list_id, self._db.get_user_id()]
+        where = "task_list_id = %s AND user_id = %s AND is_deleted = 'N'"
         if expected_last_modified is not None:
             where += " AND last_modified = %s"
             params.append(expected_last_modified)

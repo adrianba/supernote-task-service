@@ -51,7 +51,7 @@ src/supernote_task_service/
   config.py       # env-driven Pydantic Settings; API-key hashing helper
   security.py     # API-key auth dependency (constant-time, hashed)
   ratelimit.py    # in-memory fixed-window rate limiter
-  db.py           # pymysql connection pool + single-user user_id detection
+  db.py           # pymysql connection pool + exposed-user user_id resolution
   encoding.py     # ms timestamps, emoji [U+XXXX], document links, ID validation
   models.py       # Pydantic request/response models
   repository.py   # parameterized SQL data-access (tasks + lists, delta sync)
@@ -79,7 +79,12 @@ These come from https://github.com/adrianba/supernote-todo and are enforced in
   explicitly changes `document_link`.
 - **IDs are 32-char lowercase hex** (`uuid.uuid4().hex`); validate inputs.
 - **Inbox is implicit:** `task_list_id IS NULL` (no group row).
-- **Single-user:** `user_id` is auto-detected and cached in `db.Database`.
+- **Configurable single-user:** the service exposes exactly one Supernote user.
+  The `user_id` is resolved once and cached in `db.Database`: by
+  `SUPERNOTE_USER_EMAIL` (looked up in `u_user`) when set, else auto-detected
+  (single user). With multiple users and no email, startup **fails fast**.
+  **Every** read and write query in `repository.py` is scoped by the resolved
+  `user_id` (parameterized `%s`) so other users' data never leaks.
 
 ## Incremental sync
 
