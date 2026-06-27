@@ -29,8 +29,8 @@ _STATUS_CODES: dict[int, str] = {
     status.HTTP_409_CONFLICT: "conflict",
     status.HTTP_410_GONE: "gone",
     status.HTTP_411_LENGTH_REQUIRED: "length_required",
-    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: "payload_too_large",
-    status.HTTP_422_UNPROCESSABLE_ENTITY: "validation_error",
+    status.HTTP_413_CONTENT_TOO_LARGE: "payload_too_large",
+    status.HTTP_422_UNPROCESSABLE_CONTENT: "validation_error",
     status.HTTP_429_TOO_MANY_REQUESTS: "rate_limited",
     status.HTTP_503_SERVICE_UNAVAILABLE: "db_unavailable",
 }
@@ -79,7 +79,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         return _error_response(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             jsonable_encoder(exc.errors()),
             "validation_error",
         )

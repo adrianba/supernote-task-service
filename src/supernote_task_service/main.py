@@ -87,7 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 if int(content_length) > settings.max_request_body_bytes:
                     return JSONResponse(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         content={"detail": "Request body too large.", "code": "payload_too_large"},
                     )
             except ValueError:
