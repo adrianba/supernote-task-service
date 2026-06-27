@@ -6,12 +6,13 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
+import pymysql
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from . import __version__
 from .config import Settings
-from .db import Database
+from .db import Database, UserResolutionError
 from .errors import register_exception_handlers
 from .ratelimit import RateLimiter
 from .repository import Repository
@@ -48,6 +49,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         limit=settings.unauth_rate_limit_requests,
         window_seconds=settings.rate_limit_window_seconds,
     )
+    # Resolve the exposed user eagerly so a misconfiguration fails fast at boot.
+    # A transient DB outage is non-fatal: log and let resolution retry lazily on
+    # the first request that needs it.
+    try:
+        user_id = database.get_user_id()
+        logger.info("Exposing Supernote tasks for user_id=%s.", user_id)
+    except UserResolutionError:
+        database.close()
+        raise
+    except pymysql.Error as exc:
+        logger.warning(
+            "Could not resolve the Supernote user at startup (database "
+            "unavailable: %s); will retry on first use.",
+            exc,
+        )
     try:
         yield
     finally:

@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     db_connect_timeout: int = Field(default=10, alias="SUPERNOTE_DB_CONNECT_TIMEOUT")
     db_pool_size: int = Field(default=5, alias="SUPERNOTE_DB_POOL_SIZE")
 
+    # Which Supernote user's tasks to expose. Looked up by email in u_user.
+    # Empty = auto-detect (single-user installs); the service refuses to start
+    # if the database contains more than one user and this is left unset.
+    user_email: str = Field(default="", alias="SUPERNOTE_USER_EMAIL")
+
     # Authentication: comma-separated API keys. Stored hashed in memory.
     api_keys: str = Field(default="", alias="API_KEYS")
 
@@ -59,6 +64,11 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:
         return value.upper()
+
+    @field_validator("user_email")
+    @classmethod
+    def _normalize_user_email(cls, value: str) -> str:
+        return value.strip()
 
     @property
     def api_key_hashes(self) -> frozenset[str]:

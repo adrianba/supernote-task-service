@@ -254,12 +254,26 @@ class FakeRepository:
 
 
 @pytest.fixture
+def _stub_user_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid hitting a real database when the app lifespan resolves the user.
+
+    The API tests exercise the routes through ``FakeRepository``; the eager
+    startup resolution in :func:`main._lifespan` would otherwise try to open a
+    real MariaDB connection.
+    """
+    monkeypatch.setattr(
+        "supernote_task_service.db.Database.get_user_id",
+        lambda self: 1,
+    )
+
+
+@pytest.fixture
 def repo() -> FakeRepository:
     return FakeRepository()
 
 
 @pytest.fixture
-def client(repo: FakeRepository):
+def client(repo: FakeRepository, _stub_user_resolution: None):
     settings = Settings(
         SUPERNOTE_DB_PASSWORD="unused",
         API_KEYS=API_KEY,
@@ -273,7 +287,7 @@ def client(repo: FakeRepository):
 
 
 @pytest.fixture
-def low_rate_client(repo: FakeRepository):
+def low_rate_client(repo: FakeRepository, _stub_user_resolution: None):
     settings = Settings(
         SUPERNOTE_DB_PASSWORD="unused",
         API_KEYS=API_KEY,

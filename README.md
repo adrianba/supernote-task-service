@@ -55,6 +55,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `SUPERNOTE_DB_PORT`            | `3306`              | MariaDB port.                                                          |
 | `SUPERNOTE_DB_USER`            | `supernote`         | MariaDB user.                                                          |
 | `SUPERNOTE_DB_NAME`            | `supernotedb`       | Database name.                                                         |
+| `SUPERNOTE_USER_EMAIL`         | `""`                | Email of the single Supernote user to expose (looked up in `u_user`). Required when the database has more than one user; auto-detected when there is exactly one. |
 | `SUPERNOTE_DB_CONNECT_TIMEOUT` | `10`                | Connect/read/write timeout (seconds).                                  |
 | `SUPERNOTE_DB_POOL_SIZE`       | `5`                 | Max pooled connections.                                                |
 | `API_KEYS`                     | `""`                | Comma-separated API keys. Hashed in memory; compared in constant time. |
@@ -71,6 +72,22 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 >
 > If `API_KEYS` is empty the service **fails closed** and rejects all
 > authenticated requests.
+
+### Multi-user databases
+
+The service exposes tasks for **exactly one** Supernote user; every query is
+scoped to that user's `user_id`, so other users' tasks and lists are never read
+or modified.
+
+- **Single-user database (default):** the user is auto-detected, so no extra
+  configuration is needed.
+- **Multiple users:** set `SUPERNOTE_USER_EMAIL` to the `email` of the user to
+  expose (matched against the `u_user` table). If more than one user exists and
+  `SUPERNOTE_USER_EMAIL` is unset — or it does not match any user — the service
+  **fails fast at startup** with a clear error rather than guessing.
+
+A transient database outage at startup is non-fatal: resolution is retried
+lazily on the first request that needs it.
 
 ---
 
