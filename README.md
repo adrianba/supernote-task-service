@@ -189,6 +189,7 @@ curl -X POST https://tasks.example.com/v1/tasks \
 #   "title": "Buy groceries 🛒", "detail": "milk, eggs",
 #   "status": "needsAction", "importance": 2,
 #   "due": "2026-05-01T09:00:00Z", "completed": null,
+#   "sort": 0,
 #   "last_modified": 1714560001234, "is_deleted": false
 # }
 ```
@@ -203,6 +204,7 @@ A task body accepts:
   "status": "needsAction | completed",
   "importance": "integer 1 (highest)..5, or null for none",
   "due": "RFC3339 datetime, a date-only YYYY-MM-DD, or null",
+  "sort": "integer >= 0, 0-based position within the list (omit to append)",
   "document_link": {
     "appName": "note",
     "fileId": "...",
@@ -212,6 +214,22 @@ A task body accepts:
   },
 }
 ```
+
+#### Task ordering (`sort`)
+
+Each task carries a 0-based **`sort`** position within its list (the Inbox keeps
+its own sequence). It maps to the Supernote `t_schedule_task.sort` column, which
+the device uses to order tasks and which **must be set for a task to appear in
+the device To-Do app**.
+
+- On **create**, omit `sort` to append the task at the end (the service uses the
+  next free position in the list); or send an explicit 0-based index.
+- On **update**, send `sort` to move the task. An explicit `null` is ignored
+  (`sort` cannot be cleared).
+- Setting an explicit index does **not** renumber sibling tasks, so indices may
+  collide; the device tie-breaks by an internal timestamp. The service does not
+  reorder list/sync responses by `sort` — those keep the stable
+  `last_modified ASC, task_id ASC` order required for incremental sync.
 
 #### Date / timezone semantics
 

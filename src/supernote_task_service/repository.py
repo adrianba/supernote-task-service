@@ -41,7 +41,7 @@ from .models import (
 
 _TASK_COLUMNS = """
     t.task_id, t.task_list_id, t.title, t.detail, t.status, t.importance,
-    t.due_time, t.completed_time, t.last_modified, t.links, t.is_deleted,
+    t.due_time, t.completed_time, t.last_modified, t.sort, t.links, t.is_deleted,
     COALESCE(g.title, 'Inbox') AS category
 """
 
@@ -83,6 +83,7 @@ class Repository:
         document_link = DocumentLink.model_validate(link_data) if link_data else None
         due = int(row["due_time"] or 0)
         completed = int(row["completed_time"] or 0)
+        sort = row.get("sort")
         return Task(
             id=row["task_id"],
             list_id=row["task_list_id"],
@@ -93,6 +94,7 @@ class Repository:
             importance=Repository._parse_importance(row.get("importance")),
             due=_ms_to_dt(due),
             completed=_ms_to_dt(completed),
+            sort=int(sort) if sort is not None else None,
             last_modified=int(row["last_modified"] or 0),
             document_link=document_link,
             is_deleted=(row["is_deleted"] == "Y"),
@@ -246,6 +248,10 @@ class Repository:
         links = (
             encode_document_link(_link_payload(data.document_link)) if data.document_link else None
         )
+        # The Supernote device requires the integer sort columns to be non-NULL
+        # or the task may not appear in the To-Do app. Default ``sort`` to the
+        # next position in the list; the other sort columns follow the upstream
+        # convention (see https://github.com/adrianba/supernote-todo).
         sql = """
         INSERT INTO t_schedule_task (
             task_id, task_list_id, user_id, title, detail,
@@ -257,10 +263,13 @@ class Repository:
             %s, %s, %s, %s, %s,
             %s, 'N', %s, %s,
             %s, %s, %s, 'N',
-            NULL, NULL, NULL, NULL, NULL, %s, %s, %s
+            %s, 0, 0, NULL, NULL, %s, 0, NULL
         )
         """
         with self._db.cursor() as cur:
+            sort = (
+                data.sort if data.sort is not None else self._next_sort(cur, data.list_id, user_id)
+            )
             cur.execute(
                 sql,
                 (
@@ -275,12 +284,26 @@ class Repository:
                     due_time,
                     completed_time,
                     links,
-                    ts,
-                    ts,
+                    sort,
                     ts,
                 ),
             )
         return task_id
+
+    @staticmethod
+    def _next_sort(cur: Any, list_id: str | None, user_id: int) -> int:
+        """Return the next 0-based ``sort`` position within a list for a user.
+
+        ``task_list_id <=> %s`` is null-safe so the implicit Inbox
+        (``task_list_id IS NULL``) is scoped correctly.
+        """
+        cur.execute(
+            "SELECT COALESCE(MAX(sort), -1) + 1 AS next_sort FROM t_schedule_task "
+            "WHERE task_list_id <=> %s AND user_id = %s AND is_deleted = 'N'",
+            (list_id, user_id),
+        )
+        row = cur.fetchone()
+        return int(row["next_sort"]) if row and row.get("next_sort") is not None else 0
 
     def update_task(
         self, task_id: str, data: TaskUpdate, *, expected_last_modified: int | None = None
@@ -306,6 +329,9 @@ class Repository:
         if "due" in fields:
             sets.append("due_time = %s")
             params.append(_dt_to_ms(data.due))
+        if "sort" in fields and data.sort is not None:
+            sets.append("sort = %s")
+            params.append(data.sort)
         if "list_id" in fields:
             sets.append("task_list_id = %s")
             params.append(data.list_id)

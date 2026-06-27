@@ -79,6 +79,12 @@ These come from https://github.com/adrianba/supernote-todo and are enforced in
   explicitly changes `document_link`.
 - **IDs are 32-char lowercase hex** (`uuid.uuid4().hex`); validate inputs.
 - **Inbox is implicit:** `task_list_id IS NULL` (no group row).
+- **Sort columns must be non-NULL for device visibility.** On insert set
+  `sort` to the next 0-based position in the list (`MAX(sort)+1`, null-safe on
+  `task_list_id`), `sort_completed`/`planer_sort`/`planer_sort_time` to `0`,
+  `sort_time` to now (ms), and leave `all_sort`/`all_sort_completed`/
+  `all_sort_time` NULL. The API exposes/accepts `sort`; never reorder list/sync
+  responses by it (sync stays `last_modified ASC, task_id ASC`).
 - **Configurable single-user:** the service exposes exactly one Supernote user.
   The `user_id` is resolved once and cached in `db.Database`: by
   `SUPERNOTE_USER_EMAIL` (looked up in `u_user`) when set, else auto-detected

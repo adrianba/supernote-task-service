@@ -346,3 +346,49 @@ def test_cursor_expiry_when_enabled(repo) -> None:
         resp = c.get("/v1/tasks?since=1", headers=auth)
         assert resp.status_code == 410
         assert resp.json()["code"] == "cursor_expired"
+
+
+# ----- sort: 0-based order within a list -----------------------------------
+
+
+def test_sort_exposed_on_create_and_get(client, auth) -> None:
+    created = client.post("/v1/tasks", json={"title": "s"}, headers=auth)
+    assert created.status_code == 201
+    body = created.json()
+    assert body["sort"] == 0
+    tid = body["id"]
+    assert client.get(f"/v1/tasks/{tid}", headers=auth).json()["sort"] == 0
+
+
+def test_sort_auto_increments_per_list(client, auth) -> None:
+    lid = client.post("/v1/lists", json={"title": "Ordered"}, headers=auth).json()["id"]
+    first = client.post("/v1/tasks", json={"title": "a", "list_id": lid}, headers=auth)
+    second = client.post("/v1/tasks", json={"title": "b", "list_id": lid}, headers=auth)
+    assert first.json()["sort"] == 0
+    assert second.json()["sort"] == 1
+    # The Inbox keeps its own independent sequence.
+    inbox = client.post("/v1/tasks", json={"title": "c"}, headers=auth)
+    assert inbox.json()["sort"] == 0
+
+
+def test_sort_explicit_value_honored(client, auth) -> None:
+    created = client.post("/v1/tasks", json={"title": "s", "sort": 7}, headers=auth)
+    assert created.status_code == 201
+    assert created.json()["sort"] == 7
+
+
+def test_sort_patch_change_and_omit(client, auth) -> None:
+    created = client.post("/v1/tasks", json={"title": "s", "sort": 3}, headers=auth)
+    tid = created.json()["id"]
+
+    changed = client.patch(f"/v1/tasks/{tid}", json={"sort": 5}, headers=auth)
+    assert changed.json()["sort"] == 5
+
+    # Omitting sort leaves it unchanged.
+    other = client.patch(f"/v1/tasks/{tid}", json={"title": "s2"}, headers=auth)
+    assert other.json()["sort"] == 5
+
+
+def test_sort_negative_rejected(client, auth) -> None:
+    resp = client.post("/v1/tasks", json={"title": "s", "sort": -1}, headers=auth)
+    assert resp.status_code == 422
