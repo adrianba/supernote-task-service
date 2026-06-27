@@ -68,6 +68,11 @@ class TaskCreate(BaseModel):
         description="Due date/time. Accepts RFC3339 or a date-only YYYY-MM-DD "
         "(interpreted as midnight UTC). Naive datetimes are treated as UTC.",
     )
+    sort: int | None = Field(
+        default=None,
+        ge=0,
+        description="0-based position within the list. Omit to append at the end (next position).",
+    )
     document_link: DocumentLink | None = None
 
 
@@ -87,6 +92,11 @@ class TaskUpdate(BaseModel):
     status: TaskStatus | None = None
     importance: int | None = Field(default=None, ge=1, le=5)
     due: datetime | None = None
+    sort: int | None = Field(
+        default=None,
+        ge=0,
+        description="0-based position within the list. Null is ignored (sort cannot be cleared).",
+    )
     document_link: DocumentLink | None = None
 
     @model_validator(mode="after")
@@ -106,6 +116,9 @@ class Task(BaseModel):
     importance: int | None = None
     due: datetime | None
     completed: datetime | None
+    sort: int | None = Field(
+        default=None, description="0-based position within the list (device order)."
+    )
     last_modified: int = Field(description="Unix epoch milliseconds.")
     document_link: DocumentLink | None = None
     is_deleted: bool = False

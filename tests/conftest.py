@@ -90,6 +90,15 @@ class FakeRepository:
     def create_task(self, data: TaskCreate) -> str:
         tid = new_id()
         ts = now_ms()
+        if data.sort is not None:
+            sort = data.sort
+        else:
+            siblings = [
+                t["sort"]
+                for t in self._tasks.values()
+                if not t["is_deleted"] and t["list_id"] == data.list_id and t["sort"] is not None
+            ]
+            sort = (max(siblings) + 1) if siblings else 0
         self._tasks[tid] = {
             "id": tid,
             "list_id": data.list_id,
@@ -99,6 +108,7 @@ class FakeRepository:
             "importance": data.importance,
             "due": datetime_to_ms(data.due) if data.due else 0,
             "completed": ts if data.status == TaskStatus.completed else 0,
+            "sort": sort,
             "last_modified": ts,
             "document_link": data.document_link,
             "is_deleted": False,
@@ -123,6 +133,8 @@ class FakeRepository:
             t["importance"] = data.importance
         if "due" in fields:
             t["due"] = datetime_to_ms(data.due) if data.due else 0
+        if "sort" in fields and data.sort is not None:
+            t["sort"] = data.sort
         if "list_id" in fields:
             t["list_id"] = data.list_id
         if "document_link" in fields:
@@ -238,6 +250,7 @@ class FakeRepository:
             importance=t.get("importance"),
             due=ms_to_datetime(t["due"]),
             completed=ms_to_datetime(t["completed"]),
+            sort=t.get("sort"),
             last_modified=t["last_modified"],
             document_link=t["document_link"],
             is_deleted=t["is_deleted"],
