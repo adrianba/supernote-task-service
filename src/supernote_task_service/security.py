@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Request
 
 
 def _extract_presented_key(authorization: str | None, x_api_key: str | None) -> str | None:
@@ -52,26 +52,3 @@ def validate_api_key(
     if not presented or not _key_matches(presented, valid_hashes):
         return None
     return hashlib.sha256(presented.encode("utf-8")).hexdigest()[:16]
-
-
-async def require_api_key(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> str:
-    """FastAPI dependency that enforces a valid API key.
-
-    Returns a stable, non-secret identifier for the authenticated caller
-    (the key hash prefix) for use as a rate-limit bucket key.
-    """
-    caller_id = validate_api_key(request, authorization, x_api_key)
-    if caller_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return caller_id
-
-
-CallerId = Depends(require_api_key)

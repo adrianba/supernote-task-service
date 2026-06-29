@@ -22,10 +22,8 @@ class _Window:
 @dataclass(frozen=True)
 class RateLimitResult:
     allowed: bool
-    limit: int
     remaining: int
     retry_after: int
-    reset_at: int
 
 
 class RateLimiter:
@@ -54,19 +52,15 @@ class RateLimiter:
             if window.count >= self._limit:
                 return RateLimitResult(
                     allowed=False,
-                    limit=self._limit,
                     remaining=0,
                     retry_after=max(1, reset_in),
-                    reset_at=reset_in,
                 )
 
             window.count += 1
             return RateLimitResult(
                 allowed=True,
-                limit=self._limit,
                 remaining=self._limit - window.count,
                 retry_after=0,
-                reset_at=reset_in,
             )
 
     def _evict_expired(self, now: float) -> None:
