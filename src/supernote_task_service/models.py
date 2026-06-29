@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 TITLE_MAX = 600
 DETAIL_MAX = 255
 LIST_TITLE_MAX = 255
-LINKS_MAX = 5000
 
 IdStr = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 
@@ -140,8 +139,3 @@ class TaskListsPage(BaseModel):
     has_more: bool = Field(
         default=False, description="True if the page was capped; keep paging while true."
     )
-
-
-class ErrorResponse(BaseModel):
-    detail: str
-    code: str

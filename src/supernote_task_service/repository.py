@@ -489,16 +489,6 @@ class Repository:
             row = cur.fetchone()
         return self._row_to_list(row) if row else None
 
-    def _list_matches_version(self, list_id: str, expected_last_modified: int) -> bool:
-        with self._db.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM t_schedule_task_group "
-                "WHERE task_list_id = %s AND user_id = %s AND is_deleted = 'N' "
-                "AND last_modified = %s",
-                (list_id, self._db.get_user_id(), expected_last_modified),
-            )
-            return cur.fetchone() is not None
-
     # ----- list writes ----------------------------------------------------
 
     def create_list(self, title: str) -> str:
