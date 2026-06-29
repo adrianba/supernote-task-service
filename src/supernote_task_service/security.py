@@ -11,8 +11,6 @@ import hmac
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from .config import Settings
-
 
 def _extract_presented_key(authorization: str | None, x_api_key: str | None) -> str | None:
     """Extract a presented API key from the Authorization or X-API-Key header."""
@@ -36,6 +34,26 @@ def _key_matches(presented: str, valid_hashes: frozenset[str]) -> bool:
     return matched
 
 
+def validate_api_key(
+    request: Request,
+    authorization: str | None,
+    x_api_key: str | None,
+) -> str | None:
+    """Return the caller id for a valid key, or ``None`` if missing/invalid.
+
+    The returned id is a stable, non-secret identifier (the key-hash prefix).
+    Never raises: the caller decides how to handle an unauthenticated request.
+    """
+    valid_hashes = request.app.state.settings.api_key_hashes
+    if not valid_hashes:
+        # Fail closed: no keys configured means no valid callers.
+        return None
+    presented = _extract_presented_key(authorization, x_api_key)
+    if not presented or not _key_matches(presented, valid_hashes):
+        return None
+    return hashlib.sha256(presented.encode("utf-8")).hexdigest()[:16]
+
+
 async def require_api_key(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -46,24 +64,14 @@ async def require_api_key(
     Returns a stable, non-secret identifier for the authenticated caller
     (the key hash prefix) for use as a rate-limit bucket key.
     """
-    settings: Settings = request.app.state.settings
-    valid_hashes = settings.api_key_hashes
-
-    unauthorized = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or missing API key.",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    if not valid_hashes:
-        # Fail closed: refuse all requests if no keys are configured.
-        raise unauthorized
-
-    presented = _extract_presented_key(authorization, x_api_key)
-    if not presented or not _key_matches(presented, valid_hashes):
-        raise unauthorized
-
-    return hashlib.sha256(presented.encode("utf-8")).hexdigest()[:16]
+    caller_id = validate_api_key(request, authorization, x_api_key)
+    if caller_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return caller_id
 
 
 CallerId = Depends(require_api_key)

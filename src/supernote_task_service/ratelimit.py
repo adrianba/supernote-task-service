@@ -1,8 +1,9 @@
 """In-memory fixed-window rate limiting.
 
-Suitable for a single process / single replica deployment. Buckets are keyed by
-the authenticated caller and the client IP so that a leaked key or a noisy IP
-cannot exhaust capacity for everyone.
+Suitable for a single process / single replica deployment. Used only to throttle
+unauthenticated / invalid-key requests, keyed by client IP, so that key guessing
+and unauthenticated floods cannot exhaust capacity. Authenticated callers are not
+rate limited.
 """
 
 from __future__ import annotations

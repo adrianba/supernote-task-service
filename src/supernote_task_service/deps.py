@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Request, Response, status
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from .config import Settings
 from .encoding import now_ms
 from .errors import ApiError
 from .ratelimit import RateLimiter
 from .repository import Repository
-from .security import require_api_key
+from .security import validate_api_key
 
 
 def get_settings(request: Request) -> Settings:
@@ -52,47 +52,37 @@ def _client_ip(request: Request, trust_proxy: bool) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _set_rate_limit_headers(response: Response, limit: int, remaining: int, reset_at: int) -> None:
-    response.headers["X-RateLimit-Limit"] = str(limit)
-    response.headers["X-RateLimit-Remaining"] = str(remaining)
-    response.headers["X-RateLimit-Reset"] = str(reset_at)
-
-
 async def enforce_rate_limit(
     request: Request,
-    response: Response,
     authorization: Annotated[str | None, Header()] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> str:
-    """Rate-limit per IP (pre-auth), authenticate, then rate-limit per caller+IP.
+    """Authenticate the caller; rate-limit only unauthenticated requests.
 
-    The pre-auth per-IP check runs *before* API-key validation so that invalid
-    keys are still throttled, preventing unbounded online key guessing.
+    Authenticated callers (valid API key) are **not** rate limited. Missing or
+    invalid keys are aggressively throttled per client IP to blunt online key
+    guessing and unauthenticated floods: when over the limit they get ``429``,
+    otherwise ``401``.
     """
+    caller_id = validate_api_key(request, authorization, x_api_key)
+    if caller_id is not None:
+        return caller_id
+
     settings: Settings = request.app.state.settings
     ip = _client_ip(request, settings.trust_proxy_headers)
-
-    pre_auth: RateLimiter = request.app.state.pre_auth_rate_limiter
-    pre = pre_auth.check(f"ip:{ip}")
-    if not pre.allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded.",
-            headers={"Retry-After": str(pre.retry_after)},
-        )
-
-    caller_id = await require_api_key(request, authorization, x_api_key)
-
-    limiter: RateLimiter = request.app.state.rate_limiter
-    result = limiter.check(f"{caller_id}:{ip}")
-    _set_rate_limit_headers(response, result.limit, result.remaining, result.reset_at)
+    unauth: RateLimiter = request.app.state.unauth_rate_limiter
+    result = unauth.check(f"ip:{ip}")
     if not result.allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded.",
             headers={"Retry-After": str(result.retry_after)},
         )
-    return caller_id
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing API key.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 RepositoryDep = Annotated[Repository, Depends(get_repository)]
