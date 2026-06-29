@@ -44,12 +44,13 @@ class Settings(BaseSettings):
     # Authentication: comma-separated API keys. Stored hashed in memory.
     api_keys: str = Field(default="", alias="API_KEYS")
 
-    # Rate limiting (fixed window per credential + client IP).
-    rate_limit_requests: int = Field(default=120, alias="RATE_LIMIT_REQUESTS")
+    # Rate limiting (fixed-window, in-memory). Authenticated callers are NOT
+    # rate limited; only unauthenticated / invalid-key requests are throttled
+    # per client IP to blunt brute-force and abuse.
     rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
-    # Pre-auth limit per client IP, applied before API-key validation to blunt
-    # online key-guessing and unauthenticated floods.
-    unauth_rate_limit_requests: int = Field(default=30, alias="UNAUTH_RATE_LIMIT_REQUESTS")
+    # Aggressive per-IP limit for unauthenticated requests (applied before/at
+    # API-key validation). Kept low on purpose.
+    unauth_rate_limit_requests: int = Field(default=10, alias="UNAUTH_RATE_LIMIT_REQUESTS")
 
     # Operational.
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

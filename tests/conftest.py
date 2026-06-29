@@ -290,7 +290,6 @@ def client(repo: FakeRepository, _stub_user_resolution: None):
     settings = Settings(
         SUPERNOTE_DB_PASSWORD="unused",
         API_KEYS=API_KEY,
-        RATE_LIMIT_REQUESTS=1000,
         RATE_LIMIT_WINDOW_SECONDS=60,
     )
     app = create_app(settings)
@@ -304,7 +303,7 @@ def low_rate_client(repo: FakeRepository, _stub_user_resolution: None):
     settings = Settings(
         SUPERNOTE_DB_PASSWORD="unused",
         API_KEYS=API_KEY,
-        RATE_LIMIT_REQUESTS=5,
+        UNAUTH_RATE_LIMIT_REQUESTS=5,
         RATE_LIMIT_WINDOW_SECONDS=60,
     )
     app = create_app(settings)

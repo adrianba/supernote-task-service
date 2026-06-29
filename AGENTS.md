@@ -50,7 +50,7 @@ All four must pass. `mypy` runs in strict mode; keep the code fully typed.
 src/supernote_task_service/
   config.py       # env-driven Pydantic Settings; API-key hashing helper
   security.py     # API-key auth dependency (constant-time, hashed)
-  ratelimit.py    # in-memory fixed-window rate limiter
+  ratelimit.py    # in-memory fixed-window rate limiter (unauthenticated IPs only)
   db.py           # pymysql connection pool + exposed-user user_id resolution
   encoding.py     # ms timestamps, emoji [U+XXXX], document links, ID validation
   models.py       # Pydantic request/response models
@@ -127,7 +127,9 @@ return `410 Gone` (`code: "cursor_expired"`); keep it defaulted off.
   are constant column lists / pre-built clause fragments (annotated with
   `# noqa: S608`); never interpolate caller-supplied values.
 - Never log API keys, passwords, or full request bodies.
-- New endpoints under `/v1` must depend on `deps.CallerDep` (auth + rate limit).
+- New endpoints under `/v1` must depend on `deps.CallerDep` (auth + unauth rate
+  limit). `CallerDep` authenticates first; valid API keys are unlimited, only
+  unauthenticated/invalid-key requests are throttled per IP.
 
 ## Coding style
 

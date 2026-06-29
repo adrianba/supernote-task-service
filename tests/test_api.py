@@ -100,16 +100,16 @@ def test_emoji_is_preserved(client, auth) -> None:
     assert got.json()["title"] == "Shop \U0001f6d2"
 
 
-def test_rate_limit_returns_429(low_rate_client, auth) -> None:
-    # Limit is 5 per window in this fixture.
-    statuses = [low_rate_client.get("/v1/lists", headers=auth).status_code for _ in range(6)]
-    assert statuses[-1] == 429
-    assert 200 in statuses
+def test_authenticated_callers_are_not_rate_limited(low_rate_client, auth) -> None:
+    # Unauth limit is just 5/window in this fixture, but valid keys are never
+    # throttled, so far more than 5 authenticated requests still succeed.
+    statuses = [low_rate_client.get("/v1/lists", headers=auth).status_code for _ in range(20)]
+    assert all(s == 200 for s in statuses)
 
 
 def test_unauthenticated_requests_are_rate_limited(low_rate_client) -> None:
-    # Pre-auth per-IP limiting (default 30/window) eventually throttles even
-    # invalid keys, so brute-forcing returns 429 rather than unlimited 401s.
+    # Invalid/missing keys are aggressively throttled per IP, so brute-forcing
+    # returns 429 rather than unlimited 401s.
     statuses = [
         low_rate_client.get("/v1/tasks", headers={"Authorization": "Bearer nope"}).status_code
         for _ in range(40)

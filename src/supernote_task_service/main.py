@@ -41,11 +41,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     database = Database(settings)
     app.state.database = database
     app.state.repository = Repository(database)
-    app.state.rate_limiter = RateLimiter(
-        limit=settings.rate_limit_requests,
-        window_seconds=settings.rate_limit_window_seconds,
-    )
-    app.state.pre_auth_rate_limiter = RateLimiter(
+    # Authenticated callers are unlimited; only unauthenticated/invalid-key
+    # requests are throttled per IP.
+    app.state.unauth_rate_limiter = RateLimiter(
         limit=settings.unauth_rate_limit_requests,
         window_seconds=settings.rate_limit_window_seconds,
     )
